@@ -1,3 +1,14 @@
-node_modules.env # if not already in .gitignore
-.env # if not already in .gitignore
+# dependencies
+node_modules/
+
+# env & secrets
 .env
+.env.*
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
