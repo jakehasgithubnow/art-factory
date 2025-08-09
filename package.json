@@ -1,0 +1,27 @@
+{
+  "name": "art-factory",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "app/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "dotenv -e .env node app/index.js",
+    "start": "node app/index.js",
+    "migrate": "psql \"postgresql://artfactory:artfactory@127.0.0.1:5433/artfactory\" -f app/db/schema.sql"
+  },
+  "dependencies": {
+    "body-parser": "^2.2.0",
+    "bullmq": "^4.12.1",
+    "cloudinary": "^2.0.0",
+    "dotenv": "^16.4.1",
+    "dotenv-cli": "^8.0.0",
+    "express": "^4.19.2",
+    "ioredis": "^5.3.2",
+    "knex": "^3.1.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.25.0",
+    "pg": "^8.11.5"
+  }
+}

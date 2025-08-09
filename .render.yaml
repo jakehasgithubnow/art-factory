@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: art-factory
+    runtime: node
+    plan: free
+    repo: https://github.com/YOUR-ORG/art-factory
+    buildCommand: "npm ci || npm install"
+    startCommand: "node app/index.js"
+    postDeploy: "npm run migrate"
+    envVars:
+      - fromGroup: art-factory-env
+      - key: DATABASE_URL
+        fromDatabase:
+          name: art-factory-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: art-factory-redis
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+
+databases:
+  - name: art-factory-db
+    databaseName: artfactory
+    user: artfactory
+    plan: starter
+
+redis:
+  - name: art-factory-redis
+    plan: developer
+
+envVarGroups:
+  - name: art-factory-env
+    envVars:
+      - key: OPENAI_API_KEY
+      - key: GOOGLE_API_KEY
+      - key: GOOGLE_CSE_ID
+      - key: CLOUDINARY_CLOUD_NAME
+      - key: CLOUDINARY_API_KEY
+      - key: CLOUDINARY_API_SECRET
+      - key: FRAME_MOCK_URL
+      - key: SHOPIFY_SHOP
+      - key: SHOPIFY_ACCESS_TOKEN
+      - key: PAINT_ENDPOINT
+      - key: INGEST_KEY
+      - key: SHOPIFY_API_VERSION
