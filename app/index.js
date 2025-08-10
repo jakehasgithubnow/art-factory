@@ -306,6 +306,8 @@ app.get('/', (_req, res) => {
           <td>
             <a href="/admin/moderate/\${row.id}" target="_blank">Moderate</a>
             &nbsp;
+            <a href="/admin/moderate-artwork/\${row.id}" target="_blank">Moderate Artwork</a>
+            &nbsp;
             <button data-requeue="\${row.id}">Requeue</button>
           </td>\`;
         tblBody.appendChild(tr);

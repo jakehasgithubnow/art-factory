@@ -107,6 +107,9 @@ export default async function artwork(job) {
       }
       const candidate = urlMatch && urlMatch.find(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
       if (candidate) painting_url = candidate;
+      if (candidate) {
+        console.log('[artwork] PiAPI extracted image URL (direct match):', painting_url);
+      }
       if (!painting_url) {
         // Fallback: some responses embed a JSON line after "data:"
         const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
@@ -115,10 +118,11 @@ export default async function artwork(job) {
             const obj = JSON.parse(line.replace(/^data:\s*/, ''));
             const str = JSON.stringify(obj);
             const m = str.match(/https?:\/\/[^"']+/);
-            if (m && m[0]) { 
-              console.log('[artwork] Found painting URL in JSON line:', m[0]);
-              painting_url = m[0].replace(/\\\//g, '/'); 
-              break; 
+            if (m && m[0]) {
+              const found = m[0].replace(/\\\//g, '/');
+              painting_url = found;
+              console.log('[artwork] PiAPI extracted image URL (JSON line):', found);
+              break;
             }
           } catch (_) { /* ignore */ }
         }
@@ -131,6 +135,7 @@ export default async function artwork(job) {
     // --- Upload the generated painting to Cloudinary ---
     let finalPaintingUrl = painting_url;
     try {
+      console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
       const { public_id, secure_url } = await uploadImage({
         image: painting_url,                      // remote URL from paint service
         folder: 'art-factory/artwork',           // keep separate from source photos
@@ -143,7 +148,7 @@ export default async function artwork(job) {
         console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
       }
     } catch (e) {
-      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL', e);
+      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
     }
 
     } else {
@@ -157,6 +162,7 @@ export default async function artwork(job) {
     // --- Upload the generated painting to Cloudinary ---
     let finalPaintingUrl = painting_url;
     try {
+      console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
       const { public_id, secure_url } = await uploadImage({
         image: painting_url,                      // remote URL from paint service
         folder: 'art-factory/artwork',           // keep separate from source photos
@@ -169,7 +175,7 @@ export default async function artwork(job) {
         console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
       }
     } catch (e) {
-      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL', e);
+      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
     }
 
     }
@@ -198,9 +204,16 @@ export default async function artwork(job) {
     console.log('[artwork] Updating artwork record with mockup URLs');
     await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
 
-    // Enqueue publish with a stable jobId for idempotency
-    console.log('[artwork] Enqueuing publish job for artworkId:', artId);
-    await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
+    // Moderation gate: require approval before publishing unless explicitly disabled
+    const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
+    if (moderateArtwork) {
+      console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
+      // ensure the flag exists (noop if column absent)
+      try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
+    } else {
+      console.log('[artwork] Skipping artwork moderation. Enqueuing publish for artworkId:', artId);
+      await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
+    }
   } catch (err) {
     if (err && err.name === 'AbortError') {
       console.error(`[artwork] Paint service request timed out after ${200}s`);
