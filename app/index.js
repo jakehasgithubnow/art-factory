@@ -154,15 +154,15 @@ async function load(){
   for(const a of data.artworks){
     const card=document.createElement('div'); card.className='card';
     const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
-    card.innerHTML = `
-      <img class="img" src="${mock||a.image_url}" alt=""/>
+    card.innerHTML = \`
+      <img class="img" src="\${mock||a.image_url}" alt=""/>
       <div class="meta">
-        <div class="row"><div>${a.location_name||''}</div></div>
+        <div class="row"><div>\${a.location_name||''}</div></div>
         <div class="row">
-          <button data-act="approve" data-id="${a.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="${a.id}">Reject</button>
+          <button data-act="approve" data-id="\${a.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${a.id}">Reject</button>
         </div>
-      </div>`;
+      </div>\`;
     grid.appendChild(card);
   }
 }
