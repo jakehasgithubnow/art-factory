@@ -40,7 +40,7 @@ export default async function artwork(job) {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    const timeoutId = setTimeout(() => controller.abort(), 200_000);
 
     let res;
     try {
