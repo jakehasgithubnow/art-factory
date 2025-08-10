@@ -2,7 +2,10 @@ import fetch from 'node-fetch';
 import { env } from '../config/env.js';
 
 const API_VERSION = env.shopifyVersion || '2024-04';
-const API_BASE = `https://${env.shop}.myshopify.com/admin/api/${API_VERSION}`;
+const shopDomain = String(env.shop)
+  .replace(/^https?:\/\//, '')
+  .replace(/\/$/, '');
+const API_BASE = `https://${shopDomain}/admin/api/${API_VERSION}`;
 
 const DEFAULT_TIMEOUT_MS = 20000;
 const MAX_RETRIES = 3;
