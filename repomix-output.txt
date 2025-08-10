@@ -355,6 +355,7 @@ export { connection };
 File: app/queue/workers.js
 ================
 import { Worker } from 'bullmq';
+import { randomUUID } from 'crypto';
 import { connection } from './queues.js';
 import catchment from '../workflows/catchment.js';
 import locations from '../workflows/locations.js';
@@ -375,22 +376,32 @@ const CONCURRENCY = {
 };
 
 function makeWorker(name, processor, concurrency) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: name,
+        ...data,
+      }));
+    } catch (_) {
+      // best-effort
+    }
+  };
   const worker = new Worker(name, processor, { connection, concurrency, prefix: PREFIX });
   worker.on('active', (job) => {
-    // eslint-disable-next-line no-console
-    console.log(`[worker:${name}] job started`, { id: job.id, name: job.name, data: job.data });
+    log({ event: 'job_started', jobId: job.id, jobName: job.name, data: job.data, attempt: job.attemptsMade });
   });
-  worker.on('completed', (job) => {
-    // eslint-disable-next-line no-console
-    console.log(`[worker:${name}] job completed`, { id: job.id, name: job.name });
+  worker.on('completed', (job, result) => {
+    log({ event: 'job_completed', jobId: job.id, jobName: job.name, duration_ms: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : undefined, resultSummary: result && typeof result === 'object' ? { ...result, ...(result?.length ? { length: result.length } : {}) } : undefined });
   });
   worker.on('failed', (job, err) => {
-    // eslint-disable-next-line no-console
-    console.error(`[worker:${name}] job failed`, { id: job?.id, name: job?.name, data: job?.data, err });
+    log({ event: 'job_failed', jobId: job?.id, jobName: job?.name, data: job?.data, attempt: job?.attemptsMade, name: err?.name, message: err?.message, stack: err?.stack });
   });
   worker.on('error', (err) => {
-    // eslint-disable-next-line no-console
-    console.error(`[worker:${name}] error`, err);
+    log({ event: 'worker_error', name: err?.name, message: err?.message, stack: err?.stack });
+  });
+  worker.on('stalled', (jobId) => {
+    log({ event: 'job_stalled', jobId });
   });
   return worker;
 }
@@ -427,6 +438,7 @@ try {
 ================
 File: app/services/cloudinary.js
 ================
+import { randomUUID } from 'crypto';
 import cloudinary from 'cloudinary';
 import { env } from '../config/env.js';
 
@@ -479,6 +491,20 @@ export async function uploadImage(
     retries = DEFAULT_RETRIES,
   } = {}
 ) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'cloudinary_upload',
+        traceId: randomUUID(),
+        ...data,
+      }));
+    } catch (_) {
+      // ignore logging errors
+    }
+  };
+
+  log({ event: 'start', folder, publicId, hasImage: Boolean(image) });
   if (!image) throw new Error('uploadImage: "image" is required');
 
   const options = {
@@ -493,22 +519,25 @@ export async function uploadImage(
 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const t0 = Date.now();
     try {
       const result = await cloudinary.v2.uploader.upload(image, options);
       const { secure_url, public_id } = result || {};
       if (!secure_url || !public_id) {
         throw new Error('Cloudinary did not return secure_url/public_id');
       }
+      log({ event: 'success', public_id, secure_url, duration_ms: Date.now() - t0 });
       return { url: secure_url, id: public_id, secure_url, public_id, result };
     } catch (err) {
       lastErr = err;
+      const code = err?.http_code || err?.statusCode;
+      const msg = err?.message || String(err);
+      log({ event: 'error', attempt, retries, code, message: msg });
       if (attempt < retries && isRetryable(err)) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delay);
         continue;
       }
-      const code = err?.http_code || err?.statusCode;
-      const msg = err?.message || String(err);
       throw new Error(`Cloudinary upload failed${code ? ` (${code})` : ''}: ${msg}`);
     }
   }
@@ -520,10 +549,24 @@ File: app/services/framemock.js
 ================
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
 
 const DEFAULT_TIMEOUT_MS = 15000; // 15s
 const DEFAULT_RETRIES = 2; // total attempts = retries + 1
 const BASE_DELAY_MS = 250;
+
+const STAGE = 'frame_mock';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -549,10 +592,18 @@ function assertAbsoluteHttpUrl(url) {
 }
 
 async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRIES, headers = {} } = {}) {
+  const traceId = randomUUID();
+  let overallStart = Date.now();
+  let attemptStart = null;
+  log({ event: 'request_start', traceId, url });
+
   let attempt = 0;
   let lastErr;
 
   while (attempt <= retries) {
+    attemptStart = Date.now();
+    log({ event: 'attempt_start', traceId, attempt: attempt + 1, timeout_ms: timeoutMs ?? DEFAULT_TIMEOUT_MS });
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
@@ -570,6 +621,7 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
       if (!res.ok) {
         // Non-2xx. Decide if retryable.
         if (isHttpRetryable(res) && attempt < retries) {
+          log({ event: 'retryable_http', traceId, status: res.status, attempt: attempt + 1 });
           // Consume body to free sockets
           try { await res.text(); } catch { /* ignore */ }
           attempt++;
@@ -577,6 +629,8 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
           await sleep(delay);
           continue;
         }
+
+        log({ event: 'http_error', traceId, status: res.status, statusText: res.statusText });
 
         let snippet = '';
         try {
@@ -593,22 +647,29 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
       try {
         data = await res.json();
       } catch {
+        log({ event: 'invalid_json', traceId });
         throw new Error('Frame mock-up service returned invalid JSON');
       }
+      log({ event: 'success', traceId, duration_ms: Date.now() - overallStart });
       return data;
     } catch (err) {
       lastErr = err;
+      log({ event: err && err.name === 'AbortError' ? 'timeout' : 'network_error', traceId, name: err?.name, message: err?.message });
       const isAbort = err && err.name === 'AbortError';
       const canRetry = !isAbort && attempt < retries; // network errors (ECONNRESET, etc.)
       if (canRetry) {
         attempt++;
         const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        log({ event: 'retry_network', traceId, attempt: attempt + 1, delay_ms: BASE_DELAY_MS * Math.pow(2, attempt - 1) });
         await sleep(delay);
         continue;
       }
       throw isAbort ? new Error('Frame mock-up request timed out') : err;
     } finally {
       clearTimeout(timer);
+      if (attemptStart) {
+        log({ event: 'attempt_end', traceId, attempt: attempt + 1, duration_ms: Date.now() - attemptStart });
+      }
     }
   }
   throw lastErr || new Error('Unknown frame mock-up error');
@@ -621,6 +682,9 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  * @returns {Promise<string[]>} Array of mockup image URLs
  */
 export async function createMockups(paintingUrl, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const traceId = randomUUID();
+  log({ event: 'createMockups_start', traceId, paintingHost: (() => { try { return new URL(paintingUrl).host; } catch { return 'invalid'; } })() });
+
   if (!env.frameMockUrl) {
     throw new Error('Missing env.frameMockUrl');
   }
@@ -641,6 +705,7 @@ export async function createMockups(paintingUrl, { timeoutMs = DEFAULT_TIMEOUT_M
   if (!Array.isArray(mockups) || mockups.some((m) => typeof m !== 'string')) {
     throw new Error('Frame mock-up response missing a valid "mockups" string array');
   }
+  log({ event: 'createMockups_success', traceId, mockups: Array.isArray(mockups) ? mockups.length : 0 });
   return mockups;
 }
 
@@ -649,18 +714,42 @@ File: app/services/google.js
 ================
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
 
-export async function imageSearch(query, num = 20) {
-  const qs = new URLSearchParams({
-    key: env.googleKey,
-    cx: env.googleCseId,
-    searchType: 'image',
-    q: query,
-    num
-  });
-  const res = await fetch(`https://customsearch.googleapis.com/customsearch/v1?${qs}`);
-  const { items = [] } = await res.json();
-  return items.map(i => ({ url: i.link, context: i.image?.contextLink }));
+const STAGE = 'google_image_search';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // ignore logging errors
+  }
+}
+
+export async function imageSearch(query, num = 10) {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'start', traceId, query, num });
+  try {
+    const qs = new URLSearchParams({
+      key: env.googleKey,
+      cx: env.googleCseId,
+      searchType: 'image',
+      q: query,
+      num
+    });
+    const res = await fetch(`https://customsearch.googleapis.com/customsearch/v1?${qs}`);
+    log({ event: 'fetched', traceId, status: res.status, statusText: res.statusText });
+    const { items = [] } = await res.json();
+    log({ event: 'success', traceId, count: items.length, duration_ms: Date.now() - start });
+    return items.map(i => ({ url: i.link, context: i.image?.contextLink }));
+  } catch (err) {
+    log({ event: 'error', traceId, name: err?.name, message: err?.message });
+    throw err;
+  }
 }
 
 ================
@@ -668,8 +757,22 @@ File: app/services/openai.js
 ================
 import OpenAI from 'openai';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
 
 const client = new OpenAI({ apiKey: env.openaiKey });
+
+const STAGE = 'openai';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 function enhanceError(err, context = {}) {
   const e = new Error(
@@ -778,6 +881,9 @@ function normalizeSchema(schema) {
  * Simple chat helper (backwards compatible)
  */
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'chat_start', traceId, model, temperature });
   try {
     const { choices } = await client.chat.completions.create({
       model,
@@ -787,12 +893,15 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
         { role: 'user', content: user },
       ],
     });
+    log({ event: 'chat_response', traceId, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
     const content = choices?.[0]?.message?.content;
     if (typeof content !== 'string') {
       throw new Error('Empty response from model');
     }
+    log({ event: 'chat_success', traceId, duration_ms: Date.now() - start, content_len: typeof content === 'string' ? content.length : 0 });
     return content.trim();
   } catch (err) {
+    log({ event: 'chat_error', traceId, name: err?.name, message: err?.message });
     throw enhanceError(err, { stage: 'chat', model });
   }
 }
@@ -818,6 +927,9 @@ export async function chatJson({
   model = 'gpt-4o-mini',
   maxRetries = 2,
 }) {
+  const traceId = randomUUID();
+  const overallStart = Date.now();
+  log({ event: 'chatJson_start', traceId, model, temperature, hasSchema: Boolean(schema) });
   // Prefer strict JSON mode if supported, fall back gracefully.
   const normalized = schema ? normalizeSchema(schema) : undefined;
   const isArraySchema = !!normalized && normalized.type === 'array';
@@ -831,8 +943,12 @@ export async function chatJson({
     ? { type: 'json_schema', json_schema: { name: 'Output', schema: effectiveSchema, strict: true } }
     : { type: 'json_object' };
 
+  log({ event: 'chatJson_prepared', traceId, response_format: response_format?.type, isArraySchema });
+
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const attemptStart = Date.now();
+    log({ event: 'chatJson_attempt', traceId, attempt: attempt + 1 });
     try {
       const { choices } = await client.chat.completions.create({
         model,
@@ -845,27 +961,34 @@ export async function chatJson({
           { role: 'user', content: user },
         ],
       });
-
+      log({ event: 'chatJson_response', traceId, attempt: attempt + 1, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
       const raw = choices?.[0]?.message?.content ?? '';
+      log({ event: 'chatJson_raw', traceId, attempt: attempt + 1, raw_len: typeof raw === 'string' ? raw.length : 0 });
       const parsed = parseJsonLoose(raw);
+      log({ event: 'chatJson_parsed', traceId, attempt: attempt + 1 });
 
       if (isArraySchema) {
         if (!parsed || typeof parsed !== 'object' || !('data' in parsed)) {
           throw new Error('Model did not return an object with a "data" array');
         }
         assertTopLevelTypeMatches(parsed.data, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
         return parsed.data;
       } else {
         assertTopLevelTypeMatches(parsed, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
         return parsed;
       }
     } catch (err) {
+      log({ event: 'chatJson_error', traceId, attempt: attempt + 1, name: err?.name, message: err?.message });
       lastErr = err;
       if (attempt < maxRetries) {
         // On retry, make the instruction even more explicit
         system = `${system}\n\nReturn ONLY minified JSON with no commentary, markdown, or code fences.`;
+        log({ event: 'chatJson_retry', traceId, next_attempt: attempt + 2 });
         continue;
       }
+      log({ event: 'chatJson_fail', traceId, total_duration_ms: Date.now() - overallStart });
       throw enhanceError(lastErr, { stage: 'chatJson', model, attempt });
     }
   }
@@ -878,6 +1001,20 @@ File: app/services/shopify.js
 ================
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const STAGE = 'shopify';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 const API_VERSION = env.shopifyVersion || '2024-04';
 const shopDomain = String(env.shop)
@@ -904,11 +1041,17 @@ function isRetryable(status) {
 }
 
 async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = {}, attempt = 0) {
+  const traceId = randomUUID();
+  const startedAt = Date.now();
+  log({ event: 'request_start', traceId, method, path });
+
   const url = `${API_BASE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { method, headers: authHeaders(), body, signal: controller.signal });
+
+    log({ event: 'response', traceId, status: res.status, statusText: res.statusText, retryAfter: res.headers.get('Retry-After') });
 
     // Retry logic for 429/5xx
     if (!res.ok && isRetryable(res.status) && attempt < MAX_RETRIES) {
@@ -918,6 +1061,7 @@ async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEO
         ? Math.ceil(retryAfter * 1000)
         : BASE_DELAY_MS * Math.pow(2, attempt);
       try { await res.text(); } catch { /* ignore body */ }
+      log({ event: 'retry', traceId, attempt: attempt + 1, status: res.status, delay_ms: delay });
       await sleep(delay);
       return fetchJson(path, { method, body, timeoutMs }, attempt + 1);
     }
@@ -938,16 +1082,19 @@ async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEO
       const errMsg = typeof payload?.errors === 'string'
         ? payload.errors
         : JSON.stringify(payload?.errors || payload);
+      log({ event: 'http_error', traceId, method, path, status: res.status, error: errMsg });
       throw new Error(`Shopify ${method} ${path} failed (${res.status}): ${errMsg}`);
     }
 
     return payload;
   } catch (err) {
+    log({ event: 'network_error', traceId, name: err?.name, message: err?.message });
     if (err && err.name === 'AbortError') {
       throw new Error(`Shopify ${method} ${path} timed out after ${timeoutMs}ms`);
     }
     throw err;
   } finally {
+    log({ event: 'request_end', traceId, duration_ms: Date.now() - startedAt });
     clearTimeout(timer);
   }
 }
@@ -970,10 +1117,15 @@ function normalizeImages(images) {
 }
 
 export async function createCollection(title, bodyHtml, handle) {
+  const traceId = randomUUID();
+  log({ event: 'create_collection_start', traceId, title, handle });
+
   const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle } });
   const data = await fetchJson('/custom_collections.json', { method: 'POST', body });
   const id = data?.custom_collection?.id;
+  log({ event: 'create_collection_response', traceId, hasId: Boolean(id) });
   if (!id) throw new Error('Shopify did not return custom_collection.id');
+  log({ event: 'create_collection_success', traceId, id });
   return id; // backward compatible
 }
 
@@ -1005,6 +1157,9 @@ export async function createProduct({
 }) {
   if (!title) throw new Error('createProduct: title is required');
 
+  const traceId = randomUUID();
+  log({ event: 'create_product_start', traceId, title, images_count: Array.isArray(images) ? images.length : 0, metafields_count: Array.isArray(metafields) ? metafields.length : 0, status });
+
   const product = {
     title,
     body_html: bodyHtml,
@@ -1018,8 +1173,11 @@ export async function createProduct({
 
   const createBody = JSON.stringify({ product });
   const data = await fetchJson('/products.json', { method: 'POST', body: createBody });
+  log({ event: 'create_product_res', traceId });
   const created = data?.product;
+  log({ event: 'create_product_created', traceId, hasId: Boolean(created?.id) });
   if (!created?.id) throw new Error('Shopify did not return product.id');
+  log({ event: 'create_product_success', traceId, productId: created.id });
 
   // Attach ALL metafields, if provided
   if (Array.isArray(metafields) && metafields.length) {
@@ -1031,10 +1189,12 @@ export async function createProduct({
         continue;
       }
       const mfBody = JSON.stringify({ metafield: mf });
+      log({ event: 'metafield_attach', traceId, productId: created.id, namespace: mf.namespace, key: mf.key, type: mf.type });
       await fetchJson(`/products/${created.id}/metafields.json`, { method: 'POST', body: mfBody });
     }
   }
 
+  log({ event: 'create_product_done', traceId, productId: created.id });
   return created.id; // backward compatible
 }
 
@@ -1479,7 +1639,37 @@ import { qCatchment } from './queue/queues.js';
 import { qArtwork } from './queue/queues.js';
 import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
+import { randomUUID } from 'crypto';
 console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.json({ limit: '1mb' }));
+
+// ---------- Basic structured request logging ----------
+app.use((req, res, next) => {
+  const start = Date.now();
+  const requestId = randomUUID();
+  req.requestId = requestId;
+  req.log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        requestId,
+        method: req.method,
+        path: req.path,
+        ...data,
+      }));
+    } catch (_) {
+      // best-effort logging
+    }
+  };
+  req.log({ event: 'request_start' });
+  res.on('finish', () => {
+    req.log({ event: 'request_end', status: res.statusCode, duration_ms: Date.now() - start });
+  });
+  next();
+});
 
 // ---------- Moderation UI ----------
 app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
@@ -1557,6 +1747,7 @@ load();
 
 // JSON for moderation grid
 app.get('/admin/photos', async (req, res, next) => {
+  const t0 = Date.now();
   try {
     const { catchmentId } = req.query;
     if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
@@ -1565,6 +1756,9 @@ app.get('/admin/photos', async (req, res, next) => {
       .select('p.id','p.src_url','p.kept','p.score','p.processed')
       .where('l.catchment_id', catchmentId)
       .orderBy('p.created_at','desc');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
     res.json({ photos: rows });
   } catch (err) {
     next(err);
@@ -1575,12 +1769,18 @@ app.get('/admin/photos', async (req, res, next) => {
 app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
+  const t0 = Date.now();
+  let uploadedToCloudinary = false;
+  let enqueuedArtwork = false;
   try {
     const photo = await db('photos').where({ id }).first();
     if (!photo) return res.status(404).json({ error: 'not_found' });
 
     if (action === 'reject') {
       await db('photos').where({ id }).update({ kept: false, processed: true });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      }
       return res.json({ ok: true, status: 'rejected' });
     }
 
@@ -1596,21 +1796,21 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
         overwrite: false,
       });
       await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+      uploadedToCloudinary = true;
     }
 
     await db('photos').where({ id }).update({ processed: true });
     await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
-
+    enqueuedArtwork = true;
+    if (typeof req.log === 'function') {
+      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+    }
     res.json({ ok: true, status: 'approved' });
   } catch (err) {
     next(err);
   }
 });
 
-const app = express();
-app.disable('x-powered-by');
-
-app.use(express.json({ limit: '1mb' }));
 
 // ---------- Operator UI (no build step) ----------
 app.get('/', (_req, res) => {
@@ -1643,6 +1843,11 @@ app.get('/', (_req, res) => {
     .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px}
     .kpi{background:#0f1320;border:1px solid #1f2839;border-radius:10px;padding:10px;text-align:center}
     .kpi b{display:block;font-size:18px}
+    .bar{height:8px;background:#0f1320;border:1px solid #1f2839;border-radius:999px;overflow:hidden}
+    .bar > i{display:block;height:100%;width:0%}
+    .bar.photos > i{background:#6aa4ff}
+    .bar.art > i{background:#22c55e}
+    .bar.pub > i{background:#f59e0b}
   </style>
   <div class="wrap">
     <h1>Art Factory · Operator</h1>
@@ -1680,10 +1885,11 @@ app.get('/', (_req, res) => {
           <thead>
             <tr>
               <th>Name</th>
-              <th>Loc</th>
-              <th>Photos</th>
-              <th>Art</th>
+              <th>Locations</th>
+              <th>Photos (kept/total)</th>
+              <th>Artwork</th>
               <th>Published</th>
+              <th>Progress</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -1706,29 +1912,62 @@ app.get('/', (_req, res) => {
 
     async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
+    function renderRows(rows){
+      tblBody.innerHTML = '';
+      for(const row of rows){
+        const photosTotal = Number(row.photos_total)||0;
+        const photosKept = Number(row.photos_kept)||0;
+        const artworks = Number(row.artworks)||0;
+        const published = Number(row.published)||0;
+        const pPhotos = photosTotal>0 ? Math.round((photosKept/photosTotal)*100) : 0;
+        const pArt = photosKept>0 ? Math.round((artworks/Math.max(photosKept,1))*100) : 0;
+        const pPub = artworks>0 ? Math.round((published/Math.max(artworks,1))*100) : 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = \`
+          <td><b>\${row.name}</b><div class="small muted">\${new Date(row.created_at).toLocaleString()}</div></td>
+          <td>\${row.locations}</td>
+          <td>\${photosKept}/\${photosTotal}</td>
+          <td>\${artworks}</td>
+          <td>\${published}</td>
+          <td>
+            <div class="small muted">Photos</div>
+            <div class="bar photos"><i style="width:\${pPhotos}%"></i></div>
+            <div class="small muted" style="margin-top:6px">Artwork</div>
+            <div class="bar art"><i style="width:\${pArt}%"></i></div>
+            <div class="small muted" style="margin-top:6px">Publish</div>
+            <div class="bar pub"><i style="width:\${pPub}%"></i></div>
+          </td>
+          <td>
+            <a href="/admin/moderate/\${row.id}" target="_blank">Moderate</a>
+            &nbsp;
+            <button data-requeue="\${row.id}">Requeue</button>
+          </td>\`;
+        tblBody.appendChild(tr);
+      }
+      lastUpdated.textContent = new Date().toLocaleTimeString();
+    }
+
     async function load(){
       try{
         const data = await json('/admin/recent');
         envHint.textContent = 'REDIS_URL: ' + (data.redisPresent ? 'set' : 'missing') + ' · DB: ' + (data.dbOk ? 'ok' : 'err');
-        tblBody.innerHTML = '';
-        for(const row of data.rows){
-          const tr = document.createElement('tr');
-          tr.innerHTML = \`
-            <td><b>\${row.name}</b><div class="small muted">\${new Date(row.created_at).toLocaleString()}</div></td>
-            <td>\${row.locations}</td>
-            <td>\${row.photos_kept}/\${row.photos_total}</td>
-            <td>\${row.artworks}</td>
-            <td>\${row.published}</td>
-            <td>
-              <a href="/admin/moderate/\${row.id}" target="_blank">Moderate</a>
-              &nbsp;
-              <button data-requeue="\${row.id}">Requeue</button>
-            </td>\`;
-          tblBody.appendChild(tr);
-        }
-        lastUpdated.textContent = new Date().toLocaleTimeString();
+        renderRows(data.rows);
       }catch(e){ msg.textContent = 'Load failed: ' + e.message; }
     }
+
+    // Realtime updates via SSE
+    try {
+      const es = new EventSource('/events');
+      es.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if(payload && payload.type === 'recent'){
+            renderRows(payload.rows || []);
+          }
+        } catch {}
+      };
+      es.onerror = () => { /* fallback to polling if needed */ };
+    } catch {}
 
     document.addEventListener('click', async (ev)=>{
       const id = ev.target?.dataset?.requeue;
@@ -1766,11 +2005,72 @@ app.get('/', (_req, res) => {
 
     $('#refresh').addEventListener('click', load);
     load();
-    setInterval(load, 4000);
   </script>
   </html>`);
 });
 
+// ---------- Server-Sent Events (SSE) for realtime operator updates ----------
+app.get('/events', async (req, res, next) => {
+  try {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const send = (payload) => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } catch (_) {
+        // ignore
+      }
+    };
+
+    // Immediately push a snapshot
+    const snapshot = await db
+      .select(
+        'c.id', 'c.name', 'c.created_at',
+        db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+      )
+      .from({ c: 'catchments' })
+      .orderBy('c.created_at', 'desc')
+      .limit(20);
+    send({ type: 'recent', rows: snapshot });
+
+    // Stream periodic updates
+    const intervalMs = 2000;
+    const iv = setInterval(async () => {
+      try {
+        const rows = await db
+          .select(
+            'c.id', 'c.name', 'c.created_at',
+            db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+          )
+          .from({ c: 'catchments' })
+          .orderBy('c.created_at', 'desc')
+          .limit(20);
+        send({ type: 'recent', rows });
+      } catch (e) {
+        // best-effort
+      }
+    }, intervalMs);
+
+    req.on('close', () => {
+      clearInterval(iv);
+      try { res.end(); } catch {}
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+ 
 // ---------- Minimal, dependency-free rate limiter ----------
 const RATE_WINDOW_MS = 60_000; // 1 minute
 const RATE_MAX = 60; // requests per window per IP
@@ -1789,6 +2089,9 @@ function rateLimit(req, res, next) {
   res.setHeader('X-RateLimit-Remaining', String(remaining));
   res.setHeader('X-RateLimit-Reset', String(Math.floor(entry.reset / 1000)));
   if (entry.count > RATE_MAX) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'rate_limited', ip, count: entry.count, window_ms: RATE_WINDOW_MS });
+    }
     return res.status(429).json({ error: 'Too many requests' });
   }
   next();
@@ -1800,6 +2103,9 @@ function requireApiKey(req, res, next) {
   if (!expected) return next();
   const provided = req.headers['x-api-key'] || req.headers['x-ingest-key'];
   if (provided !== expected) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'auth_failed' });
+    }
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
@@ -1835,6 +2141,7 @@ function validateCatchmentBody(body) {
 // ---------- Ingest: create a catchment and kick off the pipeline ----------
 app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
   try {
+    const t0 = Date.now();
     const { valid, errors, name, lat, lon, intro } = validateCatchmentBody(req.body);
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
@@ -1843,10 +2150,14 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       .returning(['id']);
     const id = insert?.[0]?.id;
     if (!id) throw new Error('Failed to create catchment');
-
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_inserted', catchmentId: id });
+    }
     // Enqueue stage 1 explicitly (idempotent jobId)
     await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
-
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+    }
     return res.status(202).json({ id });
   } catch (err) {
     next(err);
@@ -1858,6 +2169,9 @@ app.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
   switch (stage) {
     case 'catchment':
       await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'requeue', stage: 'catchment', id, jobId: `catchment:${id}` });
+      }
       break;
     default:
       return res.status(400).send('bad stage');
@@ -1868,6 +2182,7 @@ app.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
 // ---------- Admin data for UI ----------
 app.get('/admin/recent', async (_req, res, next) => {
   try {
+    const t0 = Date.now();
     // last 20 catchments with rollup counts
     const rows = await db
       .select(
@@ -1903,6 +2218,9 @@ app.get('/admin/recent', async (_req, res, next) => {
       .orderBy('c.created_at', 'desc')
       .limit(20);
 
+    if (typeof _req.log === 'function') {
+      _req.log({ event: 'admin_recent', count: rows.length, duration_ms: Date.now() - t0 });
+    }
     res.json({
       rows,
       redisPresent: Boolean(process.env.REDIS_URL),
@@ -1921,8 +2239,21 @@ app.use((_req, res) => {
 
 // 500
 // eslint-disable-next-line no-unused-vars
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled error', err);
+app.use((err, req, res, _next) => {
+  try {
+    const payload = {
+      ts: new Date().toISOString(),
+      event: 'unhandled_error',
+      requestId: req?.requestId,
+      name: err?.name,
+      message: err?.message,
+      stack: err?.stack,
+    };
+    console.error(JSON.stringify(payload));
+  } catch (_) {
+    // best-effort
+    console.error('Unhandled error', err);
+  }
   res.status(500).json({ error: 'internal_error' });
 });
 
@@ -1930,40 +2261,10 @@ app.use((err, _req, res, _next) => {
 const PORT = env.port || 3000;
 const HOST = '0.0.0.0';
 app.listen(PORT, HOST, () => {
-  console.log(`Art-factory listening on http://${HOST}:${PORT}`);
+  console.log(JSON.stringify({ ts: new Date().toISOString(), event: 'app_listening', host: HOST, port: PORT, moderationEnabled: Boolean(process.env.MODERATION_ENABLED), redisPresent: Boolean(process.env.REDIS_URL) }));
 });
 
-export default app;import { env } from '../config/env.js';
-import { qArtwork } from '../queue/queues.js';
-
-...
-
-if (photoRow.kept) {
-  if (!env.moderationEnabled) {
-    if (!photoRow.cloudinary_id || !photoRow.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photoRow.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photoRow.id}`,
-        overwrite: false,
-      });
-      await db('photos').where({ id: photoRow.id }).update({ cloudinary_id: public_id, secure_url });
-    }
-
-    await qArtwork.add('artwork', { photoId: photoRow.id }, { jobId: `artwork:${photoRow.id}` });
-  }
-}
-
-await db('photos').where({ id: photoRow.id }).update({
-  score,
-  kept: photoRow.kept,
-  processed: env.moderationEnabled ? false : true,
-  updated_at: new Date(),
-});
-
-
-// In app/config/env.js inside the exported env object:
-  // Moderation (gate artwork after photo discovery)
-  moderationEnabled: bool('MODERATION_ENABLED', false),
+export default app;
 
 ================
 File: .gitignore

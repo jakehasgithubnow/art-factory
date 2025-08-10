@@ -15,7 +15,7 @@ function log(data = {}) {
   }
 }
 
-export async function imageSearch(query, num = 20) {
+export async function imageSearch(query, num = 10) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: 'start', traceId, query, num });
