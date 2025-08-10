@@ -126,8 +126,10 @@ export async function chatJson({
   const isArraySchema = !!schema && schema.type === 'array';
   const effectiveSchema = schema
     ? (isArraySchema
-        ? { type: 'object', properties: { data: schema }, required: ['data'] }
-        : schema)
+        ? { type: 'object', additionalProperties: false, properties: { data: schema }, required: ['data'] }
+        : schema.type === 'object'
+          ? { ...schema, additionalProperties: false }
+          : schema)
     : undefined;
 
   const response_format = effectiveSchema

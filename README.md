@@ -74,7 +74,7 @@ In essence, the application automates the entire process from defining a geograp
     SHOPIFY_SHOP=...
 
     # Database (Postgres)
-    DATABASE_URL="postgresql://artfactory:artfactory@127.0.0.1:5433/artfactory"
+    DATABASE_URL="REDACTED"
     REDIS_URL="redis://localhost:6379"
 
     # Optional: custom port (defaults to 3000)
