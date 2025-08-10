@@ -7,7 +7,17 @@ import { qPublish } from './queue/queues.js';
 import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
 import { randomUUID } from 'crypto';
+
 console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
+// Ensure DB column for second-stage moderation exists (safe on repeated runs)
+(async () => {
+  try {
+    await db.raw('ALTER TABLE IF EXISTS artwork ADD COLUMN IF NOT EXISTS approved_for_publish boolean;');
+    console.log('[startup] ensured artwork.approved_for_publish column');
+  } catch (e) {
+    console.warn('[startup] failed to ensure artwork.approved_for_publish column:', e?.message || e);
+  }
+})();
 
 const app = express();
 app.disable('x-powered-by');
