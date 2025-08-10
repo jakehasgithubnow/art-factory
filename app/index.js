@@ -13,7 +13,8 @@ console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
 (async () => {
   try {
     await db.raw('ALTER TABLE IF EXISTS artwork ADD COLUMN IF NOT EXISTS approved_for_publish boolean;');
-    console.log('[startup] ensured artwork.approved_for_publish column');
+    await db.raw('ALTER TABLE IF EXISTS artwork ADD COLUMN IF NOT EXISTS moderated_at timestamptz;');
+    console.log('[startup] ensured artwork.approved_for_publish and artwork.moderated_at columns');
   } catch (e) {
     console.warn('[startup] failed to ensure artwork.approved_for_publish column:', e?.message || e);
   }
