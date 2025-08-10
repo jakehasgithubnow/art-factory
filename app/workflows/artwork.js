@@ -38,6 +38,15 @@ export default async function artwork(job) {
     let painting_url;           // raw URL from paint service
     let finalPaintingUrl;       // Cloudinary (preferred) or fallback to painting_url
 
+    const normalizeUrl = (u) =>
+      String(u)
+        .trim()
+        .replace(/^['"(]+|[)'"]+$/g, '')   // strip leading '(' '" and trailing ) '"
+        .replace(/\\u0026/g, '&')          // decode common escapes from SSE JSON
+        .replace(/\\u003d/g, '=')
+        .replace(/\\u002F/g, '/')
+        .replace(/\\\//g, '/');
+
     // Choose request shape based on endpoint
     const usePiapi = isPiapiEndpoint(PAINT_ENDPOINT);
     console.log(`[artwork] Starting job for photoId=${photoId}, using endpoint: ${PAINT_ENDPOINT}, usePiapi=${usePiapi}`);
@@ -104,12 +113,12 @@ export default async function artwork(job) {
         chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       }
       // Try to extract a URL from the stream payload
-      const urlMatch = chunks.match(/https?:\/\/[^\s"']+/g);
+      const urlMatch = chunks.match(/https?:\/\/[^\s"'()\\]+/g);
       if (urlMatch) {
         console.log('[artwork] Found candidate URLs in stream:', urlMatch);
       }
       const candidate = urlMatch && urlMatch.find(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
-      if (candidate) painting_url = candidate;
+      if (candidate) painting_url = normalizeUrl(candidate);
       if (candidate) {
         console.log('[artwork] PiAPI extracted image URL (direct match):', painting_url);
       }
@@ -119,9 +128,9 @@ export default async function artwork(job) {
           try {
             const obj = JSON.parse(line.replace(/^data:\s*/, ''));
             const str = JSON.stringify(obj);
-            const m = str.match(/https?:\/\/[^"']+/);
+            const m = str.match(/https?:\/\/[^\s"'()\\]+/);
             if (m && m[0]) {
-              const found = m[0].replace(/\\\//g, '/');
+              const found = normalizeUrl(m[0]);
               painting_url = found;
               console.log('[artwork] PiAPI extracted image URL (JSON line):', found);
               break;
@@ -135,7 +144,8 @@ export default async function artwork(job) {
       console.log('[artwork] Painting URL resolved from PiAPI:', painting_url);
 
       // Normalize any stray trailing characters from stream (e.g., trailing ')')
-      painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+      // painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+
       finalPaintingUrl = painting_url;
 
       // --- Upload the generated painting to Cloudinary ---
@@ -164,7 +174,8 @@ export default async function artwork(job) {
       }
       console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
 
-      painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+      // painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+
       finalPaintingUrl = painting_url;
 
       // --- Upload the generated painting to Cloudinary ---
