@@ -962,7 +962,7 @@ import { createMockups } from '../services/framemock.js';
 import { qPublish } from '../queue/queues.js';
 
 // Read configuration (prefer env helper, fallback to process.env)
-import env from '../env.js';
+import { env } from '../config/env.js';
 const PAINT_ENDPOINT = (env && (env.paintEndpoint || env.PAINT_ENDPOINT)) || process.env.PAINT_ENDPOINT;
 const CLOUDINARY_CLOUD_NAME = (env && (env.cloudinaryCloudName || env.cloudName || env.CLOUDINARY_CLOUD_NAME)) || process.env.CLOUDINARY_CLOUD_NAME;
 
@@ -1515,7 +1515,20 @@ export default app;
 ================
 File: .gitignore
 ================
-node_modules
+# dependencies
+node_modules/
+
+# env & secrets
+.env
+.env.*
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
 
 ================
 File: .render.yaml

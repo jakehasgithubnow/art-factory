@@ -72,7 +72,6 @@ In essence, the application automates the entire process from defining a geograp
 
     # Shopify
     SHOPIFY_SHOP=...
-    SHOPIFY_ACCESS_TOKEN=...
 
     # Database (Postgres)
     DATABASE_URL="postgresql://artfactory:artfactory@127.0.0.1:5433/artfactory"
