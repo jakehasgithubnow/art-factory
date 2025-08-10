@@ -35,8 +35,9 @@ export default async function artwork(job) {
     }
 
     // Will hold the final artwork URL we use across steps
-    let painting_url;           // raw URL from paint service
-    let finalPaintingUrl;       // Cloudinary (preferred) or fallback to painting_url
+    // For multiple images
+    let painting_urls = [];         // array of raw URLs from paint service
+    let finalPaintingUrls = [];     // array of Cloudinary (preferred) or fallback to painting_urls
 
     const normalizeUrl = (u) =>
       String(u)
@@ -70,7 +71,7 @@ export default async function artwork(job) {
               role: 'user',
               content: [
                 { type: 'image_url', image_url: { url: imageSource } },
-                { type: 'text', text: 'Generate a framed fine-art style painting based on this reference photo.' }
+                { type: 'text', text: 'Generate a framed fine-art style painting based on this reference photo. Output an image' }
               ]
             }
           ],
@@ -106,79 +107,123 @@ export default async function artwork(job) {
     console.log(`[artwork] Paint service response status: ${res.status}`);
 
     if (usePiapi) {
-      console.log('[artwork] Reading PiAPI stream response...');
-      // PiAPI streams chunks; find a URL in the stream (best-effort)
-      let chunks = '';
-      for await (const chunk of res.body) {
-        chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      }
-      // Try to extract a URL from the stream payload
-      const urlMatch = chunks.match(/https?:\/\/[^\s"'()\\]+/g);
-      if (urlMatch) {
-        console.log('[artwork] Found candidate URLs in stream:', urlMatch);
-      }
-      const candidate = urlMatch && urlMatch.find(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
-      if (candidate) painting_url = normalizeUrl(candidate);
-      if (candidate) {
-        console.log('[artwork] PiAPI extracted image URL (direct match):', painting_url);
-      }
-      if (!painting_url) {
+      // --- RETRY LOGIC for PiAPI ---
+      let attempt = 0;
+      let maxAttempts = 3;
+      let foundImageLinks = false;
+      let lastChunks = '';
+      while (attempt < maxAttempts && !foundImageLinks) {
+        if (attempt > 0) {
+          console.warn(`[artwork] PiAPI image URL not found, retrying... attempt ${attempt + 1}/${maxAttempts}`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        attempt++;
+        let localController = new AbortController();
+        let localTimeoutId = setTimeout(() => localController.abort(), 200_000);
+        let localRes;
+        try {
+          console.log('[artwork] Sending request to PiAPI paint endpoint...');
+          const body = {
+            model: 'gpt-4o-image',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'image_url', image_url: { url: imageSource } },
+                  { type: 'text', text: 'Generate a framed fine-art style painting based on this reference photo. Output an image' }
+                ]
+              }
+            ],
+            stream: true
+          };
+          localRes = await fetch(PAINT_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'text/event-stream',
+              'Authorization': `Bearer ${PAINT_API_KEY}`
+            },
+            body: JSON.stringify(body),
+            signal: localController.signal
+          });
+        } finally {
+          clearTimeout(localTimeoutId);
+        }
+        console.log(`[artwork] PiAPI paint service response status: ${localRes.status}`);
+        console.log('[artwork] Reading PiAPI stream response...');
+        let chunks = '';
+        for await (const chunk of localRes.body) {
+          chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        }
+        lastChunks = chunks;
+        // Find all URLs matching image extensions
+        let urlMatches = chunks.match(/https?:\/\/[^\s"'()\\]+/g);
+        let imgCandidates = [];
+        if (urlMatches) {
+          imgCandidates = urlMatches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
+        }
+        // Also, parse JSON lines for embedded image links
         const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
         for (const line of jsonLines) {
           try {
             const obj = JSON.parse(line.replace(/^data:\s*/, ''));
             const str = JSON.stringify(obj);
-            const m = str.match(/https?:\/\/[^\s"'()\\]+/);
-            if (m && m[0]) {
-              const found = normalizeUrl(m[0]);
-              painting_url = found;
-              console.log('[artwork] PiAPI extracted image URL (JSON line):', found);
-              break;
+            // Find all image URLs in the JSON string
+            const matches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+            if (matches && matches.length > 0) {
+              for (const m of matches) {
+                if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(m)) {
+                  imgCandidates.push(m);
+                }
+              }
             }
           } catch (_) { /* ignore */ }
         }
+        // Deduplicate
+        painting_urls = [...new Set(imgCandidates.map(normalizeUrl))];
+        if (painting_urls.length > 0) {
+          foundImageLinks = true;
+          console.log('[artwork] Found candidate image URLs in stream:', painting_urls);
+        }
       }
-      if (!painting_url) {
+      if (!painting_urls || painting_urls.length === 0) {
+        console.error('[artwork] PiAPI stream did not include any image URLs');
         throw new Error('PiAPI stream did not include an image URL');
       }
-      console.log('[artwork] Painting URL resolved from PiAPI:', painting_url);
-
-      // Normalize any stray trailing characters from stream (e.g., trailing ')')
-      // painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
-
-      finalPaintingUrl = painting_url;
-
-      // --- Upload the generated painting to Cloudinary ---
-      try {
-        console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
-        console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
-        const { public_id, secure_url } = await uploadImage(
-          String(painting_url),
-          { folder: 'art-factory/artwork', publicId: `artwork_${photoId}` }
-        );
-        if (secure_url) {
-          finalPaintingUrl = secure_url;
-          console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
-        } else {
-          console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+      // --- Upload all generated paintings to Cloudinary ---
+      for (let i = 0; i < painting_urls.length; ++i) {
+        const painting_url = painting_urls[i];
+        let finalUrl = painting_url;
+        try {
+          console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
+          console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
+          const { public_id, secure_url } = await uploadImage(
+            String(painting_url),
+            { folder: 'art-factory/artwork', publicId: `artwork_${photoId}_${i}` }
+          );
+          if (secure_url) {
+            finalUrl = secure_url;
+            console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+          } else {
+            console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+          }
+        } catch (e) {
+          console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
         }
-      } catch (e) {
-        console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
+        finalPaintingUrls.push(finalUrl);
       }
-
     } else {
       const data = await res.json();
-      painting_url = data && data.painting_url;
+      // Legacy API: only one painting_url
+      let painting_url = data && data.painting_url;
       if (!painting_url || typeof painting_url !== 'string') {
         throw new Error('Paint service did not return a valid painting_url');
       }
+      painting_url = normalizeUrl(painting_url);
       console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
-
-      // painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
-
-      finalPaintingUrl = painting_url;
-
-      // --- Upload the generated painting to Cloudinary ---
+      painting_urls = [painting_url];
+      // --- Upload painting to Cloudinary ---
+      let finalUrl = painting_url;
       try {
         console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
         console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
@@ -187,7 +232,7 @@ export default async function artwork(job) {
           { folder: 'art-factory/artwork', publicId: `artwork_${photoId}` }
         );
         if (secure_url) {
-          finalPaintingUrl = secure_url;
+          finalUrl = secure_url;
           console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
         } else {
           console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
@@ -195,36 +240,84 @@ export default async function artwork(job) {
       } catch (e) {
         console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
       }
-
+      finalPaintingUrls = [finalUrl];
     }
 
-    // Fallback: if upload failed and finalPaintingUrl wasn't set, use raw painting_url
-    if (!finalPaintingUrl) finalPaintingUrl = painting_url;
+    // Fallback: if upload failed and finalPaintingUrls wasn't set, use raw painting_urls
+    if (!finalPaintingUrls || finalPaintingUrls.length === 0) finalPaintingUrls = painting_urls;
 
-    // 2. GPT auto-description
+    // 2. GPT auto-description (use first painting for description)
+    const mainPaintingUrl = finalPaintingUrls[0];
     console.log('[artwork] Requesting GPT auto-description for painting...');
     const description = await chat(
       'Describe a painting in 35 words.',
-      `Describe the colours, medium and vibe of the painting at ${finalPaintingUrl}`
+      `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
     );
 
     // 3. Save
-    console.log('[artwork] Inserting artwork into database...');
-    const [{ id: artId }] = await db('artwork')
-      .insert({ photo_id: photoId, image_url: finalPaintingUrl, description })
-      .returning(['id']);
+    // If DB supports an array column image_urls, prefer that; else, insert one row per image
+    let supportsArrayCol = false;
+    try {
+      // Try to insert with image_urls array column (if exists)
+      await db('artwork')
+        .insert({ photo_id: photoId, image_urls: finalPaintingUrls, description })
+        .returning(['id']);
+      supportsArrayCol = true;
+      console.log('[artwork] Inserted artwork with image_urls array column.');
+    } catch (e) {
+      // Fallback: insert one row per image_url
+      supportsArrayCol = false;
+      console.log('[artwork] image_urls array column not supported, inserting one row per image_url...');
+      for (let i = 0; i < finalPaintingUrls.length; ++i) {
+        const url = finalPaintingUrls[i];
+        // For the first image, use the GPT description; for others, use empty or generic
+        let desc = (i === 0) ? description : '';
+        const [{ id: artId }] = await db('artwork')
+          .insert({ photo_id: photoId, image_url: url, description: desc })
+          .returning(['id']);
+        // 4. Mock-ups next (best-effort) -- only for first image
+        if (i === 0) {
+          let mockups = [];
+          try {
+            console.log('[artwork] Creating mockups...');
+            mockups = await createMockups(url);
+          } catch (e) {
+            console.warn('createMockups failed', e);
+          }
+          console.log('[artwork] Updating artwork record with mockup URLs');
+          await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
+          // Moderation gate: require approval before publishing unless explicitly disabled
+          const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
+          if (moderateArtwork) {
+            console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
+            // ensure the flag exists (noop if column absent)
+            try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
+          } else {
+            console.log('[artwork] Skipping artwork moderation. Enqueuing publish for artworkId:', artId);
+            await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
+          }
+        }
+      }
+      return; // done
+    }
 
-    // 4. Mock-ups next (best-effort)
+    // If we reach here, image_urls array column is supported, so only one row inserted
+    // Get the inserted artwork id (from the first insert above)
+    const [{ id: artId }] = await db('artwork')
+      .where({ photo_id: photoId })
+      .orderBy('id', 'desc')
+      .limit(1)
+      .select('id');
+    // 4. Mock-ups next (best-effort) -- only for first image
     let mockups = [];
     try {
       console.log('[artwork] Creating mockups...');
-      mockups = await createMockups(finalPaintingUrl);
+      mockups = await createMockups(mainPaintingUrl);
     } catch (e) {
       console.warn('createMockups failed', e);
     }
     console.log('[artwork] Updating artwork record with mockup URLs');
     await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-
     // Moderation gate: require approval before publishing unless explicitly disabled
     const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
     if (moderateArtwork) {
