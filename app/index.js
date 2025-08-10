@@ -3,6 +3,7 @@ import db from './db/client.js';
 import { env } from './config/env.js';
 import { qCatchment } from './queue/queues.js';
 import { qArtwork } from './queue/queues.js';
+import { qPublish } from './queue/queues.js';
 import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
 import { randomUUID } from 'crypto';
@@ -111,6 +112,77 @@ load();
   }
 });
 
+// ---------- Artwork Moderation UI ----------
+app.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Artwork</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:220px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Artwork</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function j(u, opt){ const r = await fetch(u, opt); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
+  grid.innerHTML='';
+  for(const a of data.artworks){
+    const card=document.createElement('div'); card.className='card';
+    const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
+    card.innerHTML = `
+      <img class="img" src="${mock||a.image_url}" alt=""/>
+      <div class="meta">
+        <div class="row"><div>${a.location_name||''}</div></div>
+        <div class="row">
+          <button data-act="approve" data-id="${a.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="${a.id}">Reject</button>
+        </div>
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button'); if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/artwork/'+id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) { next(err); }
+});
+
 // JSON for moderation grid
 app.get('/admin/photos', async (req, res, next) => {
   const t0 = Date.now();
@@ -129,6 +201,32 @@ app.get('/admin/photos', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// List artworks for moderation (pending by default)
+app.get('/admin/artworks', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId, status = 'pending' } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('artwork as a')
+      .join('photos as p', 'p.id', 'a.photo_id')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
+        'p.id as photo_id','l.name as location_name'
+      )
+      .where('l.catchment_id', catchmentId)
+      .modify(qb => {
+        if (status === 'pending') qb.where('a.approved_for_publish', false).andWhere('a.published', false);
+        if (status === 'approved') qb.where('a.approved_for_publish', true);
+        if (status === 'rejected') qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
+      })
+      .orderBy('a.id','desc')
+      .limit(200);
+    if (typeof req.log === 'function') req.log({ event: 'admin_artworks', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    res.json({ artworks: rows });
+  } catch (err) { next(err); }
 });
 
 // Approve/Reject photo
@@ -175,6 +273,27 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// Moderate generated artwork (approve => enqueue publish, reject => mark only)
+app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const { action } = req.body || {};
+  const t0 = Date.now();
+  try {
+    if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
+
+    if (action === 'reject') {
+      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
+    await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
+    if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'approve', enqueuedPublish: true, duration_ms: Date.now() - t0 });
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) { next(err); }
 });
 
 
