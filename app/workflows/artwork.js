@@ -34,6 +34,10 @@ export default async function artwork(job) {
       throw new Error('Cannot derive source image URL (missing photo.secure_url and CLOUDINARY_CLOUD_NAME).');
     }
 
+    // Will hold the final artwork URL we use across steps
+    let painting_url;           // raw URL from paint service
+    let finalPaintingUrl;       // Cloudinary (preferred) or fallback to painting_url
+
     // Choose request shape based on endpoint
     const usePiapi = isPiapiEndpoint(PAINT_ENDPOINT);
     console.log(`[artwork] Starting job for photoId=${photoId}, using endpoint: ${PAINT_ENDPOINT}, usePiapi=${usePiapi}`);
@@ -92,7 +96,6 @@ export default async function artwork(job) {
 
     console.log(`[artwork] Paint service response status: ${res.status}`);
 
-    let painting_url;
     if (usePiapi) {
       console.log('[artwork] Reading PiAPI stream response...');
       // PiAPI streams chunks; find a URL in the stream (best-effort)
@@ -111,7 +114,6 @@ export default async function artwork(job) {
         console.log('[artwork] PiAPI extracted image URL (direct match):', painting_url);
       }
       if (!painting_url) {
-        // Fallback: some responses embed a JSON line after "data:"
         const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
         for (const line of jsonLines) {
           try {
@@ -132,24 +134,27 @@ export default async function artwork(job) {
       }
       console.log('[artwork] Painting URL resolved from PiAPI:', painting_url);
 
-    // --- Upload the generated painting to Cloudinary ---
-    let finalPaintingUrl = painting_url;
-    try {
-      console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
-      const { public_id, secure_url } = await uploadImage({
-        image: painting_url,                      // remote URL from paint service
-        folder: 'art-factory/artwork',           // keep separate from source photos
-        publicId: `artwork_${photoId}`           // idempotent per photo
-      });
-      if (secure_url) {
-        finalPaintingUrl = secure_url;
-        console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
-      } else {
-        console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+      // Normalize any stray trailing characters from stream (e.g., trailing ')')
+      painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+      finalPaintingUrl = painting_url;
+
+      // --- Upload the generated painting to Cloudinary ---
+      try {
+        console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
+        const { public_id, secure_url } = await uploadImage({
+          image: String(painting_url),              // ensure a plain string
+          folder: 'art-factory/artwork',
+          publicId: `artwork_${photoId}`
+        });
+        if (secure_url) {
+          finalPaintingUrl = secure_url;
+          console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+        } else {
+          console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+        }
+      } catch (e) {
+        console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
       }
-    } catch (e) {
-      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
-    }
 
     } else {
       const data = await res.json();
@@ -159,26 +164,31 @@ export default async function artwork(job) {
       }
       console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
 
-    // --- Upload the generated painting to Cloudinary ---
-    let finalPaintingUrl = painting_url;
-    try {
-      console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
-      const { public_id, secure_url } = await uploadImage({
-        image: painting_url,                      // remote URL from paint service
-        folder: 'art-factory/artwork',           // keep separate from source photos
-        publicId: `artwork_${photoId}`           // idempotent per photo
-      });
-      if (secure_url) {
-        finalPaintingUrl = secure_url;
-        console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
-      } else {
-        console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+      painting_url = String(painting_url).trim().replace(/\)\s*$/, '');
+      finalPaintingUrl = painting_url;
+
+      // --- Upload the generated painting to Cloudinary ---
+      try {
+        console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
+        const { public_id, secure_url } = await uploadImage({
+          image: String(painting_url),              // ensure a plain string
+          folder: 'art-factory/artwork',
+          publicId: `artwork_${photoId}`
+        });
+        if (secure_url) {
+          finalPaintingUrl = secure_url;
+          console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+        } else {
+          console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+        }
+      } catch (e) {
+        console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
       }
-    } catch (e) {
-      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
-    }
 
     }
+
+    // Fallback: if upload failed and finalPaintingUrl wasn't set, use raw painting_url
+    if (!finalPaintingUrl) finalPaintingUrl = painting_url;
 
     // 2. GPT auto-description
     console.log('[artwork] Requesting GPT auto-description for painting...');
