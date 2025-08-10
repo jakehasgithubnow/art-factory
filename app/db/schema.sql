@@ -13,10 +13,10 @@ create table if not exists catchments (
 );
 
 -- Guardrails for geo ranges (no-op if already present)
-alter table catchments
-  add constraint if not exists catchments_lat_range check (lat >= -90 and lat <= 90);
-alter table catchments
-  add constraint if not exists catchments_lon_range check (lon >= -180 and lon <= 180);
+alter table catchments drop constraint if exists catchments_lat_range;
+alter table catchments add constraint catchments_lat_range check (lat >= -90 and lat <= 90);
+alter table catchments drop constraint if exists catchments_lon_range;
+alter table catchments add constraint catchments_lon_range check (lon >= -180 and lon <= 180);
 
 -- Prevent duplicate catchments (same name+lat+lon, case-insensitive on name)
 create unique index if not exists catchments_unique_name_geo
@@ -66,8 +66,8 @@ create table if not exists photos (
 );
 
 -- Idempotent constraints & indexes for photos
-alter table photos
-  add constraint if not exists photos_score_range check (score is null or (score >= 0 and score <= 1));
+alter table photos drop constraint if exists photos_score_range;
+alter table photos add constraint photos_score_range check (score is null or (score >= 0 and score <= 1));
 create index if not exists idx_photos_location on photos(location_id);
 create unique index if not exists photos_location_src_url on photos(location_id, src_url);
 
