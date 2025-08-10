@@ -63,6 +63,7 @@ export default async function artwork(job) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
             'Authorization': `Bearer ${PAINT_API_KEY}`
           },
           body: JSON.stringify(body),
@@ -92,12 +93,9 @@ export default async function artwork(job) {
     let painting_url;
     if (usePiapi) {
       // PiAPI streams chunks; find a URL in the stream (best-effort)
-      const reader = res.body.getReader();
       let chunks = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        chunks += Buffer.from(value).toString('utf8');
+      for await (const chunk of res.body) {
+        chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       }
       // Try to extract a URL from the stream payload
       const urlMatch = chunks.match(/https?:\/\/[^\s"']+/g);
