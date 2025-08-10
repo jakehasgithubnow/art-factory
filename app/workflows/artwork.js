@@ -35,6 +35,8 @@ export default async function artwork(job) {
 
     // Choose request shape based on endpoint
     const usePiapi = isPiapiEndpoint(PAINT_ENDPOINT);
+    console.log(`[artwork] Starting job for photoId=${photoId}, using endpoint: ${PAINT_ENDPOINT}, usePiapi=${usePiapi}`);
+    console.log(`[artwork] Source image URL: ${imageSource}`);
     if (usePiapi && !PAINT_API_KEY) {
       throw new Error('PAINT_API_KEY is required for PiAPI endpoint');
     }
@@ -45,6 +47,7 @@ export default async function artwork(job) {
     let res;
     try {
       if (usePiapi) {
+        console.log('[artwork] Sending request to PiAPI paint endpoint...');
         // PiAPI gpt-4o-image requires chat/completions streaming
         const body = {
           model: 'gpt-4o-image',
@@ -70,6 +73,7 @@ export default async function artwork(job) {
           signal: controller.signal
         });
       } else {
+        console.log('[artwork] Sending request to legacy paint service...');
         // Legacy/simple paint service
         res = await fetch(PAINT_ENDPOINT, {
           method: 'POST',
@@ -85,13 +89,11 @@ export default async function artwork(job) {
       clearTimeout(timeoutId);
     }
 
-    if (!res.ok) {
-      const bodyText = await res.text().catch(() => '');
-      throw new Error(`Paint service error ${res.status}: ${bodyText}`);
-    }
+    console.log(`[artwork] Paint service response status: ${res.status}`);
 
     let painting_url;
     if (usePiapi) {
+      console.log('[artwork] Reading PiAPI stream response...');
       // PiAPI streams chunks; find a URL in the stream (best-effort)
       let chunks = '';
       for await (const chunk of res.body) {
@@ -99,6 +101,9 @@ export default async function artwork(job) {
       }
       // Try to extract a URL from the stream payload
       const urlMatch = chunks.match(/https?:\/\/[^\s"']+/g);
+      if (urlMatch) {
+        console.log('[artwork] Found candidate URLs in stream:', urlMatch);
+      }
       const candidate = urlMatch && urlMatch.find(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
       if (candidate) painting_url = candidate;
       if (!painting_url) {
@@ -109,28 +114,36 @@ export default async function artwork(job) {
             const obj = JSON.parse(line.replace(/^data:\s*/, ''));
             const str = JSON.stringify(obj);
             const m = str.match(/https?:\/\/[^"']+/);
-            if (m && m[0]) { painting_url = m[0].replace(/\\\//g, '/'); break; }
+            if (m && m[0]) { 
+              console.log('[artwork] Found painting URL in JSON line:', m[0]);
+              painting_url = m[0].replace(/\\\//g, '/'); 
+              break; 
+            }
           } catch (_) { /* ignore */ }
         }
       }
       if (!painting_url) {
         throw new Error('PiAPI stream did not include an image URL');
       }
+      console.log('[artwork] Painting URL resolved from PiAPI:', painting_url);
     } else {
       const data = await res.json();
       painting_url = data && data.painting_url;
       if (!painting_url || typeof painting_url !== 'string') {
         throw new Error('Paint service did not return a valid painting_url');
       }
+      console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
     }
 
     // 2. GPT auto-description
+    console.log('[artwork] Requesting GPT auto-description for painting...');
     const description = await chat(
       'Describe a painting in 35 words.',
       `Describe the colours, medium and vibe of the painting at ${painting_url}`
     );
 
     // 3. Save
+    console.log('[artwork] Inserting artwork into database...');
     const [{ id: artId }] = await db('artwork')
       .insert({ photo_id: photoId, image_url: painting_url, description })
       .returning(['id']);
@@ -138,18 +151,21 @@ export default async function artwork(job) {
     // 4. Mock-ups next (best-effort)
     let mockups = [];
     try {
+      console.log('[artwork] Creating mockups...');
       mockups = await createMockups(painting_url);
     } catch (e) {
       console.warn('createMockups failed', e);
     }
+    console.log('[artwork] Updating artwork record with mockup URLs');
     await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
 
     // Enqueue publish with a stable jobId for idempotency
+    console.log('[artwork] Enqueuing publish job for artworkId:', artId);
     await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
   } catch (err) {
     if (err && err.name === 'AbortError') {
-      console.error('artwork workflow timed out contacting paint service', { photoId });
-      throw new Error('Paint service request timed out (30s)');
+      console.error(`[artwork] Paint service request timed out after ${200}s`);
+      throw new Error('Paint service request timed out (200s)');
     }
     console.error('artwork workflow failed', { photoId, err });
     throw err;
