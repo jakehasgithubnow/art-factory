@@ -71,6 +71,7 @@ app/
   index.js
 .gitignore
 .render.yaml
+replacements.txt
 
 ================================================================
 Files
@@ -1529,6 +1530,7 @@ yarn-error.log*
 
 # OS
 .DS_Store
+.env
 
 ================
 File: .render.yaml
@@ -1581,6 +1583,12 @@ envVarGroups:
       - key: PAINT_ENDPOINT
       - key: INGEST_KEY
       - key: SHOPIFY_API_VERSION
+
+================
+File: replacements.txt
+================
+regex:shpat_[A-Za-z0-9]+==>REDACTED
+regex:sk-[A-Za-z0-9_-]{20,}==>REDACTED
 
 
 

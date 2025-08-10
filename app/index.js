@@ -4,6 +4,7 @@ import db from './db/client.js';
 import { env } from './config/env.js';
 import { qCatchment } from './queue/queues.js';
 import './queue/workers.js'; // spin up processors
+console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
 
 const app = express();
 app.disable('x-powered-by');
