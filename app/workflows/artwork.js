@@ -2,6 +2,7 @@ import db from '../db/client.js';
 import fetch from 'node-fetch';
 import { chat } from '../services/openai.js';
 import { createMockups } from '../services/framemock.js';
+import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
 
 // Read configuration (prefer env helper, fallback to process.env)
@@ -126,6 +127,25 @@ export default async function artwork(job) {
         throw new Error('PiAPI stream did not include an image URL');
       }
       console.log('[artwork] Painting URL resolved from PiAPI:', painting_url);
+
+    // --- Upload the generated painting to Cloudinary ---
+    let finalPaintingUrl = painting_url;
+    try {
+      const { public_id, secure_url } = await uploadImage({
+        image: painting_url,                      // remote URL from paint service
+        folder: 'art-factory/artwork',           // keep separate from source photos
+        publicId: `artwork_${photoId}`           // idempotent per photo
+      });
+      if (secure_url) {
+        finalPaintingUrl = secure_url;
+        console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+      } else {
+        console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+      }
+    } catch (e) {
+      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL', e);
+    }
+
     } else {
       const data = await res.json();
       painting_url = data && data.painting_url;
@@ -133,26 +153,45 @@ export default async function artwork(job) {
         throw new Error('Paint service did not return a valid painting_url');
       }
       console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
+
+    // --- Upload the generated painting to Cloudinary ---
+    let finalPaintingUrl = painting_url;
+    try {
+      const { public_id, secure_url } = await uploadImage({
+        image: painting_url,                      // remote URL from paint service
+        folder: 'art-factory/artwork',           // keep separate from source photos
+        publicId: `artwork_${photoId}`           // idempotent per photo
+      });
+      if (secure_url) {
+        finalPaintingUrl = secure_url;
+        console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+      } else {
+        console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+      }
+    } catch (e) {
+      console.warn('[artwork] Cloudinary upload failed, falling back to paint URL', e);
+    }
+
     }
 
     // 2. GPT auto-description
     console.log('[artwork] Requesting GPT auto-description for painting...');
     const description = await chat(
       'Describe a painting in 35 words.',
-      `Describe the colours, medium and vibe of the painting at ${painting_url}`
+      `Describe the colours, medium and vibe of the painting at ${finalPaintingUrl}`
     );
 
     // 3. Save
     console.log('[artwork] Inserting artwork into database...');
     const [{ id: artId }] = await db('artwork')
-      .insert({ photo_id: photoId, image_url: painting_url, description })
+      .insert({ photo_id: photoId, image_url: finalPaintingUrl, description })
       .returning(['id']);
 
     // 4. Mock-ups next (best-effort)
     let mockups = [];
     try {
       console.log('[artwork] Creating mockups...');
-      mockups = await createMockups(painting_url);
+      mockups = await createMockups(finalPaintingUrl);
     } catch (e) {
       console.warn('createMockups failed', e);
     }
