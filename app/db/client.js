@@ -1,8 +1,10 @@
 import knexFn from 'knex';
 import { env } from '../config/env.js';
 
-export default knexFn({
+const db = knexFn({
   client: 'pg',
   connection: env.databaseUrl,
   migrations: { tableName: 'knex_migrations' }
 });
+
+export default db;
