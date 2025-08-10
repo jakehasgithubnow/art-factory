@@ -218,7 +218,12 @@ app.get('/admin/artworks', async (req, res, next) => {
       )
       .where('l.catchment_id', catchmentId)
       .modify(qb => {
-        if (status === 'pending') qb.where('a.approved_for_publish', false).andWhere('a.published', false);
+        if (status === 'pending') {
+          qb.where('a.published', false)
+            .andWhere(inner => {
+              inner.where('a.approved_for_publish', false).orWhereNull('a.approved_for_publish');
+            });
+        }
         if (status === 'approved') qb.where('a.approved_for_publish', true);
         if (status === 'rejected') qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
       })
