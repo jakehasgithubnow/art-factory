@@ -78,6 +78,34 @@ function assertTopLevelTypeMatches(value, schema) {
   }
 }
 
+function normalizeSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+
+  if (schema.type === 'object') {
+    const inputProps = schema.properties || {};
+    const properties = {};
+    for (const [k, v] of Object.entries(inputProps)) {
+      properties[k] = normalizeSchema(v);
+    }
+    const required = Object.keys(properties);
+    return {
+      type: 'object',
+      properties,
+      required,
+      additionalProperties: false,
+    };
+  }
+
+  if (schema.type === 'array') {
+    return {
+      type: 'array',
+      items: normalizeSchema(schema.items),
+    };
+  }
+
+  return schema; // primitives as-is
+}
+
 /**
  * Simple chat helper (backwards compatible)
  */
@@ -123,13 +151,12 @@ export async function chatJson({
   maxRetries = 2,
 }) {
   // Prefer strict JSON mode if supported, fall back gracefully.
-  const isArraySchema = !!schema && schema.type === 'array';
-  const effectiveSchema = schema
+  const normalized = schema ? normalizeSchema(schema) : undefined;
+  const isArraySchema = !!normalized && normalized.type === 'array';
+  const effectiveSchema = normalized
     ? (isArraySchema
-        ? { type: 'object', additionalProperties: false, properties: { data: schema }, required: ['data'] }
-        : schema.type === 'object'
-          ? { ...schema, additionalProperties: false }
-          : schema)
+        ? { type: 'object', additionalProperties: false, properties: { data: normalized }, required: ['data'] }
+        : normalized)
     : undefined;
 
   const response_format = effectiveSchema
