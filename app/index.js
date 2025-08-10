@@ -112,13 +112,13 @@ app.get('/', (_req, res) => {
         tblBody.innerHTML = '';
         for(const row of data.rows){
           const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><b>${row.name}</b><div class="small muted">${new Date(row.created_at).toLocaleString()}</div></td>
-            <td>${row.locations}</td>
-            <td>${row.photos_kept}/${row.photos_total}</td>
-            <td>${row.artworks}</td>
-            <td>${row.published}</td>
-            <td><button data-requeue="${row.id}">Requeue</button></td>`;
+          tr.innerHTML = \`
+            <td><b>\${row.name}</b><div class="small muted">\${new Date(row.created_at).toLocaleString()}</div></td>
+            <td>\${row.locations}</td>
+            <td>\${row.photos_kept}/\${row.photos_total}</td>
+            <td>\${row.artworks}</td>
+            <td>\${row.published}</td>
+            <td><button data-requeue="\${row.id}">Requeue</button></td>\`;
           tblBody.appendChild(tr);
         }
         lastUpdated.textContent = new Date().toLocaleTimeString();
