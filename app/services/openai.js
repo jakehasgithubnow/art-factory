@@ -123,8 +123,15 @@ export async function chatJson({
   maxRetries = 2,
 }) {
   // Prefer strict JSON mode if supported, fall back gracefully.
-  const response_format = schema
-    ? { type: 'json_schema', json_schema: { name: 'Output', schema, strict: true } }
+  const isArraySchema = !!schema && schema.type === 'array';
+  const effectiveSchema = schema
+    ? (isArraySchema
+        ? { type: 'object', properties: { data: schema }, required: ['data'] }
+        : schema)
+    : undefined;
+
+  const response_format = effectiveSchema
+    ? { type: 'json_schema', json_schema: { name: 'Output', schema: effectiveSchema, strict: true } }
     : { type: 'json_object' };
 
   let lastErr;
@@ -135,8 +142,8 @@ export async function chatJson({
         temperature,
         response_format,
         messages: [
-          { role: 'system', content: schema
-              ? `${system}\n\nYou must return ONLY valid minified JSON satisfying the provided schema.`
+          { role: 'system', content: effectiveSchema
+              ? `${system}\n\nYou must return ONLY valid minified JSON satisfying the provided schema.${isArraySchema ? ' The top-level object MUST have a single key "data" containing the array.' : ''}`
               : `${system}\n\nYou must return ONLY valid minified JSON.` },
           { role: 'user', content: user },
         ],
@@ -144,8 +151,17 @@ export async function chatJson({
 
       const raw = choices?.[0]?.message?.content ?? '';
       const parsed = parseJsonLoose(raw);
-      assertTopLevelTypeMatches(parsed, schema);
-      return parsed;
+
+      if (isArraySchema) {
+        if (!parsed || typeof parsed !== 'object' || !('data' in parsed)) {
+          throw new Error('Model did not return an object with a "data" array');
+        }
+        assertTopLevelTypeMatches(parsed.data, schema);
+        return parsed.data;
+      } else {
+        assertTopLevelTypeMatches(parsed, schema);
+        return parsed;
+      }
     } catch (err) {
       lastErr = err;
       if (attempt < maxRetries) {
