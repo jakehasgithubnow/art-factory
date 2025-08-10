@@ -1,9 +1,23 @@
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
 
 const DEFAULT_TIMEOUT_MS = 15000; // 15s
 const DEFAULT_RETRIES = 2; // total attempts = retries + 1
 const BASE_DELAY_MS = 250;
+
+const STAGE = 'frame_mock';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,10 +43,18 @@ function assertAbsoluteHttpUrl(url) {
 }
 
 async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRIES, headers = {} } = {}) {
+  const traceId = randomUUID();
+  let overallStart = Date.now();
+  let attemptStart = null;
+  log({ event: 'request_start', traceId, url });
+
   let attempt = 0;
   let lastErr;
 
   while (attempt <= retries) {
+    attemptStart = Date.now();
+    log({ event: 'attempt_start', traceId, attempt: attempt + 1, timeout_ms: timeoutMs ?? DEFAULT_TIMEOUT_MS });
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
@@ -50,6 +72,7 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
       if (!res.ok) {
         // Non-2xx. Decide if retryable.
         if (isHttpRetryable(res) && attempt < retries) {
+          log({ event: 'retryable_http', traceId, status: res.status, attempt: attempt + 1 });
           // Consume body to free sockets
           try { await res.text(); } catch { /* ignore */ }
           attempt++;
@@ -57,6 +80,8 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
           await sleep(delay);
           continue;
         }
+
+        log({ event: 'http_error', traceId, status: res.status, statusText: res.statusText });
 
         let snippet = '';
         try {
@@ -73,22 +98,29 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
       try {
         data = await res.json();
       } catch {
+        log({ event: 'invalid_json', traceId });
         throw new Error('Frame mock-up service returned invalid JSON');
       }
+      log({ event: 'success', traceId, duration_ms: Date.now() - overallStart });
       return data;
     } catch (err) {
       lastErr = err;
+      log({ event: err && err.name === 'AbortError' ? 'timeout' : 'network_error', traceId, name: err?.name, message: err?.message });
       const isAbort = err && err.name === 'AbortError';
       const canRetry = !isAbort && attempt < retries; // network errors (ECONNRESET, etc.)
       if (canRetry) {
         attempt++;
         const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        log({ event: 'retry_network', traceId, attempt: attempt + 1, delay_ms: BASE_DELAY_MS * Math.pow(2, attempt - 1) });
         await sleep(delay);
         continue;
       }
       throw isAbort ? new Error('Frame mock-up request timed out') : err;
     } finally {
       clearTimeout(timer);
+      if (attemptStart) {
+        log({ event: 'attempt_end', traceId, attempt: attempt + 1, duration_ms: Date.now() - attemptStart });
+      }
     }
   }
   throw lastErr || new Error('Unknown frame mock-up error');
@@ -101,6 +133,9 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  * @returns {Promise<string[]>} Array of mockup image URLs
  */
 export async function createMockups(paintingUrl, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const traceId = randomUUID();
+  log({ event: 'createMockups_start', traceId, paintingHost: (() => { try { return new URL(paintingUrl).host; } catch { return 'invalid'; } })() });
+
   if (!env.frameMockUrl) {
     throw new Error('Missing env.frameMockUrl');
   }
@@ -121,5 +156,6 @@ export async function createMockups(paintingUrl, { timeoutMs = DEFAULT_TIMEOUT_M
   if (!Array.isArray(mockups) || mockups.some((m) => typeof m !== 'string')) {
     throw new Error('Frame mock-up response missing a valid "mockups" string array');
   }
+  log({ event: 'createMockups_success', traceId, mockups: Array.isArray(mockups) ? mockups.length : 0 });
   return mockups;
 }

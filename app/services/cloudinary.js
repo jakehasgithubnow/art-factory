@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import cloudinary from 'cloudinary';
 import { env } from '../config/env.js';
 
@@ -50,6 +51,20 @@ export async function uploadImage(
     retries = DEFAULT_RETRIES,
   } = {}
 ) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'cloudinary_upload',
+        traceId: randomUUID(),
+        ...data,
+      }));
+    } catch (_) {
+      // ignore logging errors
+    }
+  };
+
+  log({ event: 'start', folder, publicId, hasImage: Boolean(image) });
   if (!image) throw new Error('uploadImage: "image" is required');
 
   const options = {
@@ -64,22 +79,25 @@ export async function uploadImage(
 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const t0 = Date.now();
     try {
       const result = await cloudinary.v2.uploader.upload(image, options);
       const { secure_url, public_id } = result || {};
       if (!secure_url || !public_id) {
         throw new Error('Cloudinary did not return secure_url/public_id');
       }
+      log({ event: 'success', public_id, secure_url, duration_ms: Date.now() - t0 });
       return { url: secure_url, id: public_id, secure_url, public_id, result };
     } catch (err) {
       lastErr = err;
+      const code = err?.http_code || err?.statusCode;
+      const msg = err?.message || String(err);
+      log({ event: 'error', attempt, retries, code, message: msg });
       if (attempt < retries && isRetryable(err)) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delay);
         continue;
       }
-      const code = err?.http_code || err?.statusCode;
-      const msg = err?.message || String(err);
       throw new Error(`Cloudinary upload failed${code ? ` (${code})` : ''}: ${msg}`);
     }
   }

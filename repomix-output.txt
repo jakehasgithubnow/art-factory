@@ -376,6 +376,14 @@ const CONCURRENCY = {
 
 function makeWorker(name, processor, concurrency) {
   const worker = new Worker(name, processor, { connection, concurrency, prefix: PREFIX });
+  worker.on('active', (job) => {
+    // eslint-disable-next-line no-console
+    console.log(`[worker:${name}] job started`, { id: job.id, name: job.name, data: job.data });
+  });
+  worker.on('completed', (job) => {
+    // eslint-disable-next-line no-console
+    console.log(`[worker:${name}] job completed`, { id: job.id, name: job.name });
+  });
   worker.on('failed', (job, err) => {
     // eslint-disable-next-line no-console
     console.error(`[worker:${name}] job failed`, { id: job?.id, name: job?.name, data: job?.data, err });
@@ -738,6 +746,34 @@ function assertTopLevelTypeMatches(value, schema) {
   }
 }
 
+function normalizeSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+
+  if (schema.type === 'object') {
+    const inputProps = schema.properties || {};
+    const properties = {};
+    for (const [k, v] of Object.entries(inputProps)) {
+      properties[k] = normalizeSchema(v);
+    }
+    const required = Object.keys(properties);
+    return {
+      type: 'object',
+      properties,
+      required,
+      additionalProperties: false,
+    };
+  }
+
+  if (schema.type === 'array') {
+    return {
+      type: 'array',
+      items: normalizeSchema(schema.items),
+    };
+  }
+
+  return schema; // primitives as-is
+}
+
 /**
  * Simple chat helper (backwards compatible)
  */
@@ -783,13 +819,12 @@ export async function chatJson({
   maxRetries = 2,
 }) {
   // Prefer strict JSON mode if supported, fall back gracefully.
-  const isArraySchema = !!schema && schema.type === 'array';
-  const effectiveSchema = schema
+  const normalized = schema ? normalizeSchema(schema) : undefined;
+  const isArraySchema = !!normalized && normalized.type === 'array';
+  const effectiveSchema = normalized
     ? (isArraySchema
-        ? { type: 'object', additionalProperties: false, properties: { data: schema }, required: ['data'] }
-        : schema.type === 'object'
-          ? { ...schema, additionalProperties: false }
-          : schema)
+        ? { type: 'object', additionalProperties: false, properties: { data: normalized }, required: ['data'] }
+        : normalized)
     : undefined;
 
   const response_format = effectiveSchema
@@ -1441,8 +1476,136 @@ import express from 'express';
 import db from './db/client.js';
 import { env } from './config/env.js';
 import { qCatchment } from './queue/queues.js';
+import { qArtwork } from './queue/queues.js';
+import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
 console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
+
+// ---------- Moderation UI ----------
+app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Photos</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Photos</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await json('/admin/photos?catchmentId=${catchmentId}');
+  grid.innerHTML = '';
+  for(const p of data.photos){
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = \`
+      <img class="img" src="\${p.src_url}" alt=""/>
+      <div class="meta">
+        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false} </div></div>
+        <div class="row">
+          <button data-act="approve" data-id="\${p.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
+        </div>
+      </div>\`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button');
+  if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// JSON for moderation grid
+app.get('/admin/photos', async (req, res, next) => {
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select('p.id','p.src_url','p.kept','p.score','p.processed')
+      .where('l.catchment_id', catchmentId)
+      .orderBy('p.created_at','desc');
+    res.json({ photos: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Approve/Reject photo
+app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const action = (req.body?.action || '').toString();
+  try {
+    const photo = await db('photos').where({ id }).first();
+    if (!photo) return res.status(404).json({ error: 'not_found' });
+
+    if (action === 'reject') {
+      await db('photos').where({ id }).update({ kept: false, processed: true });
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
+
+    // Approve: mark kept, ensure upload, then enqueue artwork
+    await db('photos').where({ id }).update({ kept: true });
+
+    if (!photo.cloudinary_id || !photo.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photo.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photo.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+    }
+
+    await db('photos').where({ id }).update({ processed: true });
+    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
+
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
 
 const app = express();
 app.disable('x-powered-by');
@@ -1556,7 +1719,11 @@ app.get('/', (_req, res) => {
             <td>\${row.photos_kept}/\${row.photos_total}</td>
             <td>\${row.artworks}</td>
             <td>\${row.published}</td>
-            <td><button data-requeue="\${row.id}">Requeue</button></td>\`;
+            <td>
+              <a href="/admin/moderate/\${row.id}" target="_blank">Moderate</a>
+              &nbsp;
+              <button data-requeue="\${row.id}">Requeue</button>
+            </td>\`;
           tblBody.appendChild(tr);
         }
         lastUpdated.textContent = new Date().toLocaleTimeString();
@@ -1766,7 +1933,37 @@ app.listen(PORT, HOST, () => {
   console.log(`Art-factory listening on http://${HOST}:${PORT}`);
 });
 
-export default app;
+export default app;import { env } from '../config/env.js';
+import { qArtwork } from '../queue/queues.js';
+
+...
+
+if (photoRow.kept) {
+  if (!env.moderationEnabled) {
+    if (!photoRow.cloudinary_id || !photoRow.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photoRow.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photoRow.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id: photoRow.id }).update({ cloudinary_id: public_id, secure_url });
+    }
+
+    await qArtwork.add('artwork', { photoId: photoRow.id }, { jobId: `artwork:${photoRow.id}` });
+  }
+}
+
+await db('photos').where({ id: photoRow.id }).update({
+  score,
+  kept: photoRow.kept,
+  processed: env.moderationEnabled ? false : true,
+  updated_at: new Date(),
+});
+
+
+// In app/config/env.js inside the exported env object:
+  // Moderation (gate artwork after photo discovery)
+  moderationEnabled: bool('MODERATION_ENABLED', false),
 
 ================
 File: .gitignore

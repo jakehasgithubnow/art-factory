@@ -1,7 +1,21 @@
 import OpenAI from 'openai';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
 
 const client = new OpenAI({ apiKey: env.openaiKey });
+
+const STAGE = 'openai';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 function enhanceError(err, context = {}) {
   const e = new Error(
@@ -110,6 +124,9 @@ function normalizeSchema(schema) {
  * Simple chat helper (backwards compatible)
  */
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'chat_start', traceId, model, temperature });
   try {
     const { choices } = await client.chat.completions.create({
       model,
@@ -119,12 +136,15 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
         { role: 'user', content: user },
       ],
     });
+    log({ event: 'chat_response', traceId, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
     const content = choices?.[0]?.message?.content;
     if (typeof content !== 'string') {
       throw new Error('Empty response from model');
     }
+    log({ event: 'chat_success', traceId, duration_ms: Date.now() - start, content_len: typeof content === 'string' ? content.length : 0 });
     return content.trim();
   } catch (err) {
+    log({ event: 'chat_error', traceId, name: err?.name, message: err?.message });
     throw enhanceError(err, { stage: 'chat', model });
   }
 }
@@ -150,6 +170,9 @@ export async function chatJson({
   model = 'gpt-4o-mini',
   maxRetries = 2,
 }) {
+  const traceId = randomUUID();
+  const overallStart = Date.now();
+  log({ event: 'chatJson_start', traceId, model, temperature, hasSchema: Boolean(schema) });
   // Prefer strict JSON mode if supported, fall back gracefully.
   const normalized = schema ? normalizeSchema(schema) : undefined;
   const isArraySchema = !!normalized && normalized.type === 'array';
@@ -163,8 +186,12 @@ export async function chatJson({
     ? { type: 'json_schema', json_schema: { name: 'Output', schema: effectiveSchema, strict: true } }
     : { type: 'json_object' };
 
+  log({ event: 'chatJson_prepared', traceId, response_format: response_format?.type, isArraySchema });
+
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const attemptStart = Date.now();
+    log({ event: 'chatJson_attempt', traceId, attempt: attempt + 1 });
     try {
       const { choices } = await client.chat.completions.create({
         model,
@@ -177,27 +204,34 @@ export async function chatJson({
           { role: 'user', content: user },
         ],
       });
-
+      log({ event: 'chatJson_response', traceId, attempt: attempt + 1, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
       const raw = choices?.[0]?.message?.content ?? '';
+      log({ event: 'chatJson_raw', traceId, attempt: attempt + 1, raw_len: typeof raw === 'string' ? raw.length : 0 });
       const parsed = parseJsonLoose(raw);
+      log({ event: 'chatJson_parsed', traceId, attempt: attempt + 1 });
 
       if (isArraySchema) {
         if (!parsed || typeof parsed !== 'object' || !('data' in parsed)) {
           throw new Error('Model did not return an object with a "data" array');
         }
         assertTopLevelTypeMatches(parsed.data, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
         return parsed.data;
       } else {
         assertTopLevelTypeMatches(parsed, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
         return parsed;
       }
     } catch (err) {
+      log({ event: 'chatJson_error', traceId, attempt: attempt + 1, name: err?.name, message: err?.message });
       lastErr = err;
       if (attempt < maxRetries) {
         // On retry, make the instruction even more explicit
         system = `${system}\n\nReturn ONLY minified JSON with no commentary, markdown, or code fences.`;
+        log({ event: 'chatJson_retry', traceId, next_attempt: attempt + 2 });
         continue;
       }
+      log({ event: 'chatJson_fail', traceId, total_duration_ms: Date.now() - overallStart });
       throw enhanceError(lastErr, { stage: 'chatJson', model, attempt });
     }
   }

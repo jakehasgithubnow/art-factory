@@ -1,4 +1,5 @@
 import { Worker } from 'bullmq';
+import { randomUUID } from 'crypto';
 import { connection } from './queues.js';
 import catchment from '../workflows/catchment.js';
 import locations from '../workflows/locations.js';
@@ -19,14 +20,32 @@ const CONCURRENCY = {
 };
 
 function makeWorker(name, processor, concurrency) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: name,
+        ...data,
+      }));
+    } catch (_) {
+      // best-effort
+    }
+  };
   const worker = new Worker(name, processor, { connection, concurrency, prefix: PREFIX });
+  worker.on('active', (job) => {
+    log({ event: 'job_started', jobId: job.id, jobName: job.name, data: job.data, attempt: job.attemptsMade });
+  });
+  worker.on('completed', (job, result) => {
+    log({ event: 'job_completed', jobId: job.id, jobName: job.name, duration_ms: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : undefined, resultSummary: result && typeof result === 'object' ? { ...result, ...(result?.length ? { length: result.length } : {}) } : undefined });
+  });
   worker.on('failed', (job, err) => {
-    // eslint-disable-next-line no-console
-    console.error(`[worker:${name}] job failed`, { id: job?.id, name: job?.name, data: job?.data, err });
+    log({ event: 'job_failed', jobId: job?.id, jobName: job?.name, data: job?.data, attempt: job?.attemptsMade, name: err?.name, message: err?.message, stack: err?.stack });
   });
   worker.on('error', (err) => {
-    // eslint-disable-next-line no-console
-    console.error(`[worker:${name}] error`, err);
+    log({ event: 'worker_error', name: err?.name, message: err?.message, stack: err?.stack });
+  });
+  worker.on('stalled', (jobId) => {
+    log({ event: 'job_stalled', jobId });
   });
   return worker;
 }

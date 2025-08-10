@@ -1,5 +1,19 @@
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const STAGE = 'shopify';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
 
 const API_VERSION = env.shopifyVersion || '2024-04';
 const shopDomain = String(env.shop)
@@ -26,11 +40,17 @@ function isRetryable(status) {
 }
 
 async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = {}, attempt = 0) {
+  const traceId = randomUUID();
+  const startedAt = Date.now();
+  log({ event: 'request_start', traceId, method, path });
+
   const url = `${API_BASE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { method, headers: authHeaders(), body, signal: controller.signal });
+
+    log({ event: 'response', traceId, status: res.status, statusText: res.statusText, retryAfter: res.headers.get('Retry-After') });
 
     // Retry logic for 429/5xx
     if (!res.ok && isRetryable(res.status) && attempt < MAX_RETRIES) {
@@ -40,6 +60,7 @@ async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEO
         ? Math.ceil(retryAfter * 1000)
         : BASE_DELAY_MS * Math.pow(2, attempt);
       try { await res.text(); } catch { /* ignore body */ }
+      log({ event: 'retry', traceId, attempt: attempt + 1, status: res.status, delay_ms: delay });
       await sleep(delay);
       return fetchJson(path, { method, body, timeoutMs }, attempt + 1);
     }
@@ -60,16 +81,19 @@ async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEO
       const errMsg = typeof payload?.errors === 'string'
         ? payload.errors
         : JSON.stringify(payload?.errors || payload);
+      log({ event: 'http_error', traceId, method, path, status: res.status, error: errMsg });
       throw new Error(`Shopify ${method} ${path} failed (${res.status}): ${errMsg}`);
     }
 
     return payload;
   } catch (err) {
+    log({ event: 'network_error', traceId, name: err?.name, message: err?.message });
     if (err && err.name === 'AbortError') {
       throw new Error(`Shopify ${method} ${path} timed out after ${timeoutMs}ms`);
     }
     throw err;
   } finally {
+    log({ event: 'request_end', traceId, duration_ms: Date.now() - startedAt });
     clearTimeout(timer);
   }
 }
@@ -92,10 +116,15 @@ function normalizeImages(images) {
 }
 
 export async function createCollection(title, bodyHtml, handle) {
+  const traceId = randomUUID();
+  log({ event: 'create_collection_start', traceId, title, handle });
+
   const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle } });
   const data = await fetchJson('/custom_collections.json', { method: 'POST', body });
   const id = data?.custom_collection?.id;
+  log({ event: 'create_collection_response', traceId, hasId: Boolean(id) });
   if (!id) throw new Error('Shopify did not return custom_collection.id');
+  log({ event: 'create_collection_success', traceId, id });
   return id; // backward compatible
 }
 
@@ -127,6 +156,9 @@ export async function createProduct({
 }) {
   if (!title) throw new Error('createProduct: title is required');
 
+  const traceId = randomUUID();
+  log({ event: 'create_product_start', traceId, title, images_count: Array.isArray(images) ? images.length : 0, metafields_count: Array.isArray(metafields) ? metafields.length : 0, status });
+
   const product = {
     title,
     body_html: bodyHtml,
@@ -140,8 +172,11 @@ export async function createProduct({
 
   const createBody = JSON.stringify({ product });
   const data = await fetchJson('/products.json', { method: 'POST', body: createBody });
+  log({ event: 'create_product_res', traceId });
   const created = data?.product;
+  log({ event: 'create_product_created', traceId, hasId: Boolean(created?.id) });
   if (!created?.id) throw new Error('Shopify did not return product.id');
+  log({ event: 'create_product_success', traceId, productId: created.id });
 
   // Attach ALL metafields, if provided
   if (Array.isArray(metafields) && metafields.length) {
@@ -153,9 +188,11 @@ export async function createProduct({
         continue;
       }
       const mfBody = JSON.stringify({ metafield: mf });
+      log({ event: 'metafield_attach', traceId, productId: created.id, namespace: mf.namespace, key: mf.key, type: mf.type });
       await fetchJson(`/products/${created.id}/metafields.json`, { method: 'POST', body: mfBody });
     }
   }
 
+  log({ event: 'create_product_done', traceId, productId: created.id });
   return created.id; // backward compatible
 }
