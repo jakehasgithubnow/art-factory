@@ -3,7 +3,7 @@ services:
     name: art-factory
     runtime: node
     plan: free
-    repo: https://github.com/YOUR-ORG/art-factory
+    repo: https://github.com/jakehasgithubnow/art-factory
     buildCommand: "npm ci || npm install"
     startCommand: "node app/index.js"
     postDeploy: "npm run migrate"

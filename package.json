@@ -1,4 +1,4 @@
-{
+<file name=0 path=/Users/jacob.murphy/art-factory/package.json>{
   "name": "art-factory",
   "version": "1.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "dotenv -e .env node app/index.js",
     "start": "node app/index.js",
-    "migrate": "psql \"postgresql://artfactory:artfactory@127.0.0.1:5433/artfactory\" -f app/db/schema.sql"
+    "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
     "body-parser": "^2.2.0",
@@ -25,3 +25,24 @@
     "pg": "^8.11.5"
   }
 }
+</file>
+
+<file name=migrate.js path=/Users/jacob.murphy/art-factory/scripts>import fs from 'node:fs/promises';
+import pg from 'pg';
+
+const { DATABASE_URL } = process.env;
+if (!DATABASE_URL) {
+  console.error('DATABASE_URL is not set');
+  process.exit(1);
+}
+
+const sql = await fs.readFile(new URL('../app/db/schema.sql', import.meta.url), 'utf8');
+const client = new pg.Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+await client.connect();
+try {
+  await client.query(sql);
+  console.log('Schema applied ✅');
+} finally {
+  await client.end();
+}
+</file>
