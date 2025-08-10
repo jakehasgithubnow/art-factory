@@ -151,11 +151,11 @@ export default async function artwork(job) {
       // --- Upload the generated painting to Cloudinary ---
       try {
         console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
-        const { public_id, secure_url } = await uploadImage({
-          image: String(painting_url),              // ensure a plain string
-          folder: 'art-factory/artwork',
-          publicId: `artwork_${photoId}`
-        });
+        console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
+        const { public_id, secure_url } = await uploadImage(
+          String(painting_url),
+          { folder: 'art-factory/artwork', publicId: `artwork_${photoId}` }
+        );
         if (secure_url) {
           finalPaintingUrl = secure_url;
           console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
@@ -181,11 +181,11 @@ export default async function artwork(job) {
       // --- Upload the generated painting to Cloudinary ---
       try {
         console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
-        const { public_id, secure_url } = await uploadImage({
-          image: String(painting_url),              // ensure a plain string
-          folder: 'art-factory/artwork',
-          publicId: `artwork_${photoId}`
-        });
+        console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
+        const { public_id, secure_url } = await uploadImage(
+          String(painting_url),
+          { folder: 'art-factory/artwork', publicId: `artwork_${photoId}` }
+        );
         if (secure_url) {
           finalPaintingUrl = secure_url;
           console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
