@@ -1,4 +1,4 @@
-<file name=0 path=/Users/jacob.murphy/art-factory/package.json>{
+{
   "name": "art-factory",
   "version": "1.0.0",
   "type": "module",
@@ -25,9 +25,7 @@
     "pg": "^8.11.5"
   }
 }
-</file>
-
-<file name=migrate.js path=/Users/jacob.murphy/art-factory/scripts>import fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import pg from 'pg';
 
 const { DATABASE_URL } = process.env;
@@ -45,4 +43,3 @@ try {
 } finally {
   await client.end();
 }
-</file>
