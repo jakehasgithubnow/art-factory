@@ -193,7 +193,7 @@ function rateLimit(req, res, next) {
 function requireApiKey(req, res, next) {
   const expected = env.ingestKey; // set to enable
   if (!expected) return next();
-  const provided = req.headers['x-api-key'];
+  const provided = req.headers['x-api-key'] || req.headers['x-ingest-key'];
   if (provided !== expected) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -267,41 +267,34 @@ app.get('/admin/recent', async (_req, res, next) => {
     const rows = await db
       .select(
         'c.id', 'c.name', 'c.created_at',
-        db.raw('COALESCE(lc.cnt,0) as locations'),
-        db.raw('COALESCE(pc.total,0) as photos_total'),
-        db.raw('COALESCE(pc.kept,0) as photos_kept'),
-        db.raw('COALESCE(ac.artworks,0) as artworks'),
-        db.raw('COALESCE(ac.published,0) as published')
-      )
-      .from({ c: 'catchments' })
-      .leftJoin(
-        db({ lc: db.raw(`(
-          select catchment_id, count(*) as cnt
-          from locations
-          group by catchment_id
-        ) lc`) }), 'lc.catchment_id', 'c.id'
-      )
-      .leftJoin(
-        db({ pc: db.raw(`(
-          select l.catchment_id,
-                 count(*) as total,
-                 sum(case when p.kept then 1 else 0 end) as kept
-          from photos p
+        db.raw(`(
+          select count(*) from locations l
+          where l.catchment_id = c.id
+        ) as locations`),
+        db.raw(`(
+          select count(*) from photos p
           join locations l on l.id = p.location_id
-          group by l.catchment_id
-        ) pc`) }), 'pc.catchment_id', 'c.id'
-      )
-      .leftJoin(
-        db({ ac: db.raw(`(
-          select l.catchment_id,
-                 count(*) as artworks,
-                 sum(case when a.published then 1 else 0 end) as published
-          from artwork a
+          where l.catchment_id = c.id
+        ) as photos_total`),
+        db.raw(`(
+          select count(*) from photos p
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and p.kept
+        ) as photos_kept`),
+        db.raw(`(
+          select count(*) from artwork a
           join photos p on p.id = a.photo_id
           join locations l on l.id = p.location_id
-          group by l.catchment_id
-        ) ac`) }), 'ac.catchment_id', 'c.id'
+          where l.catchment_id = c.id
+        ) as artworks`),
+        db.raw(`(
+          select count(*) from artwork a
+          join photos p on p.id = a.photo_id
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and a.published
+        ) as published`)
       )
+      .from({ c: 'catchments' })
       .orderBy('c.created_at', 'desc')
       .limit(20);
 
