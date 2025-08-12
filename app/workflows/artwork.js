@@ -15,6 +15,26 @@ function isPiapiEndpoint(url) { try { return new URL(url).host.endsWith('piapi.a
 
 export default async function artwork(job) {
   const { photoId } = job.data;
+
+  // --- Deduplication check ---
+  try {
+    const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+    if (await tracker.isProcessed(photoId)) {
+      console.log(`[artwork] Artwork for ${photoId} already processed or in progress — skipping PiAPI call`);
+      return;
+    }
+    // Mark as in-progress and initialise attempt counter if not set
+    const attemptKey = `artwork_attempts:${photoId}`;
+    const currentAttempts = parseInt(process.env[`ATTEMPT_${photoId}`] || '0', 10);
+    if (currentAttempts >= 3) {
+      console.log(`[artwork] Max retry attempts reached for ${photoId}, skipping`);
+      return;
+    }
+    process.env[`ATTEMPT_${photoId}`] = String(currentAttempts + 1);
+    await tracker.markInProgress(photoId);
+  } catch (e) {
+    console.warn('[artwork] Dedupe tracker unavailable or failed', e);
+  }
   const photo = await db('photos').where({ id: photoId }).first();
   if (!photo || !photo.processed) return;
 
@@ -254,6 +274,14 @@ export default async function artwork(job) {
       `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
     );
 
+    // Mark artwork as completed in tracker
+    try {
+      const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+      await tracker.markCompleted(photoId);
+    } catch (e) {
+      console.warn('[artwork] Could not mark artwork complete in tracker', e);
+    }
+
     // 3. Save
     // If DB supports an array column image_urls, prefer that; else, insert one row per image
     let supportsArrayCol = false;
@@ -329,6 +357,13 @@ export default async function artwork(job) {
       await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
     }
   } catch (err) {
+    // Clear in-progress tracker entry on failure
+    try {
+      const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+      await tracker.clearInProgress(photoId);
+    } catch (e) {
+      console.warn('[artwork] Could not clear in-progress state in tracker', e);
+    }
     if (err && err.name === 'AbortError') {
       console.error(`[artwork] Paint service request timed out after ${200}s`);
       throw new Error('Paint service request timed out (200s)');
