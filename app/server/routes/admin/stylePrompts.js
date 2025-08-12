@@ -1,7 +1,7 @@
 import express from 'express';
 import * as stylePrompts from '../../../db/stylePrompts.js';
 
-const router = express.Router();
+const router = express.Router({ mergeParams: true });
 
 // Get all prompts
 router.get('/', async (req, res) => {
