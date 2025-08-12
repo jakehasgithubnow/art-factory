@@ -13,6 +13,8 @@ import eventsRoute from './routes/events.js';
 import catchmentsRoute from './routes/catchments.js';
 import adminRecent from './routes/adminRecent.js';
 import healthRoute from './routes/health.js';
+import stylePromptsApi from './routes/admin/stylePrompts.js';
+import stylePromptsUI from './routes/admin/stylePromptsUI.js';
 
 // Initialize app
 export function createApp() {
