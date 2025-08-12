@@ -57,7 +57,7 @@ export function createApp() {
   app.use('/', catchmentsRoute);
   app.use('/', adminRecent);
   app.use('/', healthRoute);
-  app.use('/', stylePromptsApi);
+  app.use('/admin/style-prompts', stylePromptsApi);
   app.use('/', stylePromptsUI);
 
   // ---------- Error handling ----------
