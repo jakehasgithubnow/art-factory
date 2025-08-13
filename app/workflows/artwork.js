@@ -132,7 +132,7 @@ export default async function artwork(job) {
         clearTimeout(timeoutId);
       }
 
-      console.log(`[artwork] Paint service response status: ${res.status}`);
+      // Removed redundant post-loop res.status log to prevent ReferenceError when res is undefined
 
       // Handle PiAPI SSE stream parsing
       let promptPaintingUrls = [];
