@@ -207,14 +207,17 @@ export default async function artwork(job) {
           .returning(['id']);
 
         if (i === 0) {
-          let mockups = [];
-          try { mockups = await createMockups(url); } catch {}
-          await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-
+          // Delay mockup creation until after moderation approval
           const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
           if (moderateArtwork) {
-            try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch {}
+            try { 
+              await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); 
+            } catch {}
           } else {
+            // If moderation is disabled, generate mockups immediately
+            let mockups = [];
+            try { mockups = await createMockups(url); } catch {}
+            await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
             await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
           }
         }
@@ -434,23 +437,20 @@ export default async function artwork(job) {
       .limit(1)
       .select('id');
     // 4. Mock-ups next (best-effort) -- only for first image
-    let mockups = [];
-    try {
-      console.log('[artwork] Creating mockups...');
-      mockups = await createMockups(mainPaintingUrl);
-    } catch (e) {
-      console.warn('createMockups failed', e);
-    }
-    console.log('[artwork] Updating artwork record with mockup URLs');
-    await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-    // Moderation gate: require approval before publishing unless explicitly disabled
+    // Delay mockup creation until after moderation approval
     const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
     if (moderateArtwork) {
       console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
-      // ensure the flag exists (noop if column absent)
       try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
     } else {
-      console.log('[artwork] Skipping artwork moderation. Enqueuing publish for artworkId:', artId);
+      console.log('[artwork] Skipping artwork moderation. Generating mockups immediately...');
+      let mockups = [];
+      try {
+        mockups = await createMockups(mainPaintingUrl);
+      } catch (e) {
+        console.warn('createMockups failed', e);
+      }
+      await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
       await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
     }
   } catch (err) {
