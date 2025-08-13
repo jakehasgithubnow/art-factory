@@ -208,6 +208,8 @@ export default async function artwork(job) {
         const artId = inserted?.[0]?.id;
         if (!artId) {
           console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this style.`);
+          // Avoid any undefined variables from lingering from earlier steps
+          res = null;
           continue;
         }
 
