@@ -201,10 +201,15 @@ export default async function artwork(job) {
       for (let i = 0; i < promptFinalUrls.length; i++) {
         const url = promptFinalUrls[i];
         const desc = (i === 0) ? description : '';
-        const [{ id: artId }] = await db('artwork')
+        const inserted = await db('artwork')
           .insert({ photo_id: photoId, image_url: url, description: desc })
           .onConflict('photo_id').ignore() // prevent duplicate key crash
           .returning(['id']);
+        const artId = inserted?.[0]?.id;
+        if (!artId) {
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this style.`);
+          continue;
+        }
 
         if (i === 0) {
           // Delay mockup creation until after moderation approval
@@ -400,9 +405,14 @@ export default async function artwork(job) {
         const url = finalPaintingUrls[i];
         // For the first image, use the GPT description; for others, use empty or generic
         let desc = (i === 0) ? description : '';
-        const [{ id: artId }] = await db('artwork')
+        const inserted = await db('artwork')
           .insert({ photo_id: photoId, image_url: url, description: desc })
           .returning(['id']);
+        const artId = inserted?.[0]?.id;
+        if (!artId) {
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this image.`);
+          continue;
+        }
         // 4. Mock-ups next (best-effort) -- only for first image
         if (i === 0) {
           let mockups = [];
