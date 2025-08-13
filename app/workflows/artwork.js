@@ -203,6 +203,7 @@ export default async function artwork(job) {
         const desc = (i === 0) ? description : '';
         const [{ id: artId }] = await db('artwork')
           .insert({ photo_id: photoId, image_url: url, description: desc })
+          .onConflict('photo_id').ignore() // prevent duplicate key crash
           .returning(['id']);
 
         if (i === 0) {
