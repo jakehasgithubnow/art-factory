@@ -84,6 +84,7 @@ export default async function artwork(job) {
       return;
     }
 
+/// Loop for each style prompt, process independently
     for (const stylePrompt of enabledPrompts) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 200_000);
@@ -92,7 +93,6 @@ export default async function artwork(job) {
       try {
         if (usePiapi) {
           console.log(`[artwork] Sending request to PiAPI paint endpoint with style prompt: ${stylePrompt.text}`);
-          // PiAPI gpt-4o-image requires chat/completions streaming
           const body = {
             model: 'gpt-4o-image',
             messages: [
@@ -118,7 +118,6 @@ export default async function artwork(job) {
           });
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
-          // Legacy/simple paint service
           res = await fetch(PAINT_ENDPOINT, {
             method: 'POST',
             headers: {
@@ -133,13 +132,93 @@ export default async function artwork(job) {
         clearTimeout(timeoutId);
       }
 
-      // We should now move the downstream processing (stream parsing, cloudinary upload, DB insert, mockup creation) INSIDE this loop,
-      // so that each enabled prompt is fully processed individually following the existing logic,
-      // ensuring each generated artwork flows independently through the rest of the workflow.
-      // Due to the size of this file, the repeated downstream logic will essentially replicate everything below this block for each prompt.
-      // This will ensure multiple enabled prompts create multiple independent artworks and follow all subsequent steps.
+      console.log(`[artwork] Paint service response status: ${res.status}`);
+
+      // Handle PiAPI SSE stream parsing
+      let promptPaintingUrls = [];
+      let promptFinalUrls = [];
+
+      if (usePiapi) {
+        let chunks = '';
+        for await (const chunk of res.body) {
+          chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        }
+        // Extract URLs
+        let urlMatches = chunks.match(/https?:\/\/[^\s"'()\\]+/g) || [];
+        let imgCandidates = urlMatches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
+
+        const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of jsonLines) {
+          try {
+            const obj = JSON.parse(line.replace(/^data:\s*/, ''));
+            const str = JSON.stringify(obj);
+            const matches = str.match(/https?:\/\/[^\s"'()\\]+/g) || [];
+            matches.forEach(m => {
+              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(m)) imgCandidates.push(m);
+            });
+          } catch {}
+        }
+        promptPaintingUrls = [...new Set(imgCandidates.map(normalizeUrl))];
+      } else {
+        const data = await res.json();
+        if (data && data.painting_url) promptPaintingUrls = [normalizeUrl(data.painting_url)];
+      }
+
+      // Upload each to Cloudinary
+      for (let i = 0; i < promptPaintingUrls.length; i++) {
+        let finalUrl = promptPaintingUrls[i];
+        try {
+          const { public_id, secure_url } = await uploadImage(
+            String(finalUrl),
+            { folder: 'art-factory/artwork', publicId: `artwork_${photoId}_${stylePrompt.id}_${i}` }
+          );
+          if (secure_url) finalUrl = secure_url;
+        } catch (e) {
+          console.warn('[artwork] Upload failed for', finalUrl, e);
+        }
+        promptFinalUrls.push(finalUrl);
+      }
+
+      // Fallback
+      if (promptFinalUrls.length === 0) promptFinalUrls = promptPaintingUrls;
+
+      // Description
+      const mainPaintingUrl = promptFinalUrls[0];
+      const description = await chat(
+        'Describe a painting in 35 words.',
+        `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+      );
+
+      // Mark complete
+      try {
+        const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+        await tracker.markCompleted(photoId);
+      } catch (e) {
+        console.warn('[artwork] Could not mark artwork complete in tracker', e);
+      }
+
+      // Save to DB
+      for (let i = 0; i < promptFinalUrls.length; i++) {
+        const url = promptFinalUrls[i];
+        const desc = (i === 0) ? description : '';
+        const [{ id: artId }] = await db('artwork')
+          .insert({ photo_id: photoId, image_url: url, description: desc })
+          .returning(['id']);
+
+        if (i === 0) {
+          let mockups = [];
+          try { mockups = await createMockups(url); } catch {}
+          await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
+
+          const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
+          if (moderateArtwork) {
+            try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch {}
+          } else {
+            await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
+          }
+        }
+      }
     }
-    return; // Prevent original single prompt logic from running
 
     console.log(`[artwork] Paint service response status: ${res.status}`);
 
