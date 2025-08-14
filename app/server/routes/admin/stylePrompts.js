@@ -47,15 +47,32 @@ router.patch('/:id', async (req, res) => {
 // Toggle prompt enabled status
 router.patch('/:id/toggle', async (req, res) => {
   try {
-    const { enabled } = req.body;
+    let { enabled } = req.body;
+
+    // Coerce string "true"/"false" to boolean
+    if (typeof enabled === 'string') {
+      if (enabled.toLowerCase() === 'true') enabled = true;
+      else if (enabled.toLowerCase() === 'false') enabled = false;
+    }
+
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'Enabled must be a boolean' });
     }
-    const prompt = await stylePrompts.togglePrompt(req.params.id, enabled);
+
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
+    }
+
+    const prompt = await stylePrompts.togglePrompt(id, enabled);
+    if (!prompt) {
+      return res.status(404).json({ error: 'Prompt not found' });
+    }
+
     res.json(prompt);
   } catch (err) {
     console.error('Failed to toggle style prompt', err);
-    res.status(500).json({ error: 'Failed to toggle style prompt' });
+    res.status(500).json({ error: 'Failed to toggle style prompt', details: err?.message });
   }
 });
 
