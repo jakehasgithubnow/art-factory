@@ -101,28 +101,18 @@ export default async function photos(job) {
 
     if (!photoRow?.id) continue;
 
-    // 3) If we decided to keep it, ensure upload to Cloudinary and enqueue artwork
+    // 3) If we decided to keep it, mark for moderation but do not upload or enqueue yet
     if (kept) {
       try {
-        if (!photoRow.processed || !photoRow.cloudinary_id || !photoRow.secure_url) {
-          // Upload to Cloudinary; store both public_id and secure_url
-          const { public_id, secure_url } = await uploadImage(srcUrl, {
-            folder: 'art-factory/source',
-            publicId: `source_${photoRow.id}`,
-            overwrite: false,
-          });
+        // Mark as kept but leave processed false for moderation to handle
+        if (!photoRow.processed) {
           await db('photos').where({ id: photoRow.id }).update({
-            cloudinary_id: public_id,
-            secure_url,
-            processed: true,
+            kept: true,
+            processed: false,
           });
         }
-
-        // Enqueue next stage with a stable jobId for idempotency
-        await qArtwork.add('artwork', { photoId: photoRow.id }, { jobId: `artwork:${photoRow.id}` });
       } catch (err) {
-        console.error('photos: upload/enqueue failed', { locationId, photoId: photoRow.id, err });
-        // Do not throw; continue with other images
+        console.error('photos: marking for moderation failed', { locationId, photoId: photoRow.id, err });
       }
     }
   }
