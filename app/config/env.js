@@ -36,6 +36,9 @@ export const env = {
   googleKey: optional('GOOGLE_API_KEY'),
   googleCseId: optional('GOOGLE_CSE_ID'),
 
+  // Openverse (image search)
+  openverseApiKey: optional('OPENVERSE_API_KEY'),
+
   // Cloudinary
   cloudName: optional('CLOUDINARY_CLOUD_NAME'),
   cloudKey: optional('CLOUDINARY_API_KEY'),

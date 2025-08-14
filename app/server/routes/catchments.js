@@ -12,6 +12,9 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
   try {
     const t0 = Date.now();
     const { valid, errors, name, lat, lon, intro } = validateCatchmentBody(req.body);
+
+    // Optional: image source selection
+    const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
     const insert = await db('catchments')
@@ -23,7 +26,11 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       req.log({ event: 'catchment_inserted', catchmentId: id });
     }
     // Enqueue stage 1 explicitly (idempotent jobId)
-    await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
+    await qCatchment.add(
+      'catchment',
+      { catchmentId: id, imageSource },
+      { jobId: `catchment:${id}` }
+    );
     if (typeof req.log === 'function') {
       req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
     }
