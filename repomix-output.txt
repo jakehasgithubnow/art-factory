@@ -2241,12 +2241,12 @@ export default async function artwork(job) {
       return;
     }
 
-/// Loop for each style prompt, process independently
+    /// Loop for each style prompt, process independently
+    let res; // Declare res in the outer scope of the for-loop
     for (const stylePrompt of enabledPrompts) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 200_000);
 
-      let res;
       try {
         if (usePiapi) {
           console.log(`[artwork] Sending request to PiAPI paint endpoint with style prompt: ${stylePrompt.text}`);

@@ -44,9 +44,10 @@ async function load(){
   for(const p of prompts){
     const tr = document.createElement('tr');
     tr.innerHTML = \`
-      <td>\${p.text}</td>
-      <td>\${p.enabled}</td>
+      <td><input type="text" value="\${p.text}" data-id="\${p.id}" class="edit-input" style="width:100%" /></td>
+      <td>\${p.enabled ? 'Yes' : 'No'}</td>
       <td>
+        <button class="save" data-id="\${p.id}">Save</button>
         <button class="toggle" data-id="\${p.id}" data-enabled="\${p.enabled}">\${p.enabled ? 'Disable' : 'Enable'}</button>
         <button class="delete" data-id="\${p.id}">Delete</button>
       </td>\`;
@@ -69,6 +70,13 @@ tableBody.addEventListener('click', async (ev)=>{
   }else if(btn.classList.contains('toggle')){
     const enabled = btn.getAttribute('data-enabled') === 'true';
     await fetch('/admin/style-prompts/' + id + '/toggle', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !enabled }) });
+  }else if(btn.classList.contains('save')){
+    const input = tableBody.querySelector('input.edit-input[data-id="' + id + '"]');
+    if(input){
+      const newText = input.value.trim();
+      if(!newText) return alert('Prompt cannot be empty');
+      await fetch('/admin/style-prompts/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: newText }) });
+    }
   }
   load();
 });
