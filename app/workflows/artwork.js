@@ -92,6 +92,20 @@ export default async function artwork(job) {
 
       try {
         if (usePiapi) {
+          // --- DEBUG LOGS START ---
+          console.log('[artwork][DEBUG] Piapi debug pre-flight:');
+          console.log('[artwork][DEBUG] usePiapi:', usePiapi);
+          console.log('[artwork][DEBUG] PAINT_ENDPOINT:', PAINT_ENDPOINT);
+          console.log('[artwork][DEBUG] PAINT_API_KEY present:', !!PAINT_API_KEY);
+          console.log('[artwork][DEBUG] imageSource:', imageSource);
+          try {
+            const headRes = await fetch(imageSource, { method: 'HEAD' });
+            console.log('[artwork][DEBUG] image HEAD status:', headRes.status);
+            if (!headRes.ok) console.warn('[artwork][DEBUG] Image URL not accessible to Piapi');
+          } catch (e) {
+            console.warn('[artwork][DEBUG] Error checking image URL reachability:', e);
+          }
+          // --- DEBUG LOGS END ---
           console.log(`[artwork] Sending request to PiAPI paint endpoint with style prompt: ${stylePrompt.text}`);
           const body = {
             model: 'gpt-4o-image',
