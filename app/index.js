@@ -94,7 +94,9 @@ async function load(){
     card.innerHTML = \`
       <img class="img" src="\${p.src_url}" alt=""/>
       <div class="meta">
-        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false} </div></div>
+        <div class="small muted">\${p.ov_title || ''} \${p.ov_creator ? '— ' + p.ov_creator : ''}</div>
+        <div class="small muted">\${p.ov_license || ''} \${p.ov_license_version || ''}</div>
+        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false}</div></div>
         <div class="row">
           <button data-act="approve" data-id="\${p.id}">Approve</button>
           <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
@@ -202,7 +204,27 @@ app.get('/admin/photos', async (req, res, next) => {
     if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
     const rows = await db('photos as p')
       .join('locations as l', 'l.id', 'p.location_id')
-      .select('p.id','p.src_url','p.kept','p.score','p.processed')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
       .where('l.catchment_id', catchmentId)
       .orderBy('p.created_at','desc');
     if (typeof req.log === 'function') {
