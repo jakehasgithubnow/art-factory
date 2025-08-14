@@ -113,6 +113,17 @@ drop trigger if exists trg_notify_artwork    on artwork;
 
 drop function if exists notify_event() cascade;
 
+-- ===================== 5. Style Prompts ===================
+create table if not exists style_prompts (
+  id serial primary key,
+  text text not null,
+  enabled boolean not null default true,
+  updated_at timestamptz default now(),
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_style_prompts_enabled on style_prompts(enabled);
+
 -- ===================== Quality-of-life ===================
 create index if not exists idx_catchments_processed on catchments(processed);
 create index if not exists idx_locations_processed on locations(processed);
