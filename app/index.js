@@ -491,7 +491,8 @@ app.get('/', (_req, res) => {
           name: nameInput.value.trim(),
           lat: Number(latInput.value),
           lon: Number(lonInput.value),
-          intro: introInput.value.trim() || undefined
+          intro: introInput.value.trim() || undefined,
+          imageSource: document.getElementById('imageSource').value
         };
         const r = await fetch('/catchments', {
           method: 'POST',
