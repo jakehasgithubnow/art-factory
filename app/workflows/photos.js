@@ -1,5 +1,6 @@
 import db from '../db/client.js';
-import { imageSearch } from '../services/google.js';
+import { imageSearch as googleImageSearch } from '../services/google.js';
+import { imageSearch as openverseImageSearch } from '../services/openverse.js';
 import { chat } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
@@ -21,7 +22,12 @@ export default async function photos(job) {
 
   let images = [];
   try {
-    images = await imageSearch(location.search_term, MAX_IMAGES);
+    const source = location.image_source || 'google';
+    if (source === 'openverse') {
+      images = await openverseImageSearch(location.search_term, MAX_IMAGES);
+    } else {
+      images = await googleImageSearch(location.search_term, MAX_IMAGES);
+    }
   } catch (err) {
     console.error('photos: imageSearch failed', { locationId, err });
     images = [];
@@ -55,8 +61,28 @@ export default async function photos(job) {
     // 2) Insert photo row idempotently
     let photoRow;
     try {
+      const insertData = { location_id: locationId, src_url: srcUrl, score, kept };
+
+      // If this is from Openverse, store the metadata fields
+      if (img.id) {
+        insertData.ov_id = img.id || null;
+        insertData.ov_title = img.title || null;
+        insertData.ov_creator = img.creator || null;
+        insertData.ov_creator_url = img.creator_url || null;
+        insertData.ov_license = img.license || null;
+        insertData.ov_license_version = img.license_version || null;
+        insertData.ov_license_url = img.license_url || null;
+        insertData.ov_source = img.source || null;
+        insertData.ov_category = img.category || null;
+        insertData.ov_provider = img.provider || null;
+        insertData.ov_thumbnail = img.thumbnail || null;
+        insertData.ov_detail_url = img.detail_url || null;
+        insertData.ov_width = img.width || null;
+        insertData.ov_height = img.height || null;
+      }
+
       const insert = await db('photos')
-        .insert({ location_id: locationId, src_url: srcUrl, score, kept })
+        .insert(insertData)
         .onConflict(['location_id', 'src_url'])
         .ignore()
         .returning(['id']);

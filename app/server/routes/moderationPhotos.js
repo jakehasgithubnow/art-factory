@@ -14,7 +14,27 @@ router.get('/admin/photos', async (req, res, next) => {
     if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
     const rows = await db('photos as p')
       .join('locations as l', 'l.id', 'p.location_id')
-      .select('p.id','p.src_url','p.kept','p.score','p.processed')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
       .where('l.catchment_id', catchmentId)
       .orderBy('p.created_at','desc');
     if (typeof req.log === 'function') {

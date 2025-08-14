@@ -62,6 +62,21 @@ create table if not exists photos (
   cloudinary_id  text,
   secure_url     text,
   processed      boolean not null default false,
+  -- Openverse metadata columns
+  ov_id              text,
+  ov_title           text,
+  ov_creator         text,
+  ov_creator_url     text,
+  ov_license         text,
+  ov_license_version text,
+  ov_license_url     text,
+  ov_source          text,
+  ov_category        text,
+  ov_provider        text,
+  ov_thumbnail       text,
+  ov_detail_url      text,
+  ov_width           integer,
+  ov_height          integer,
   created_at     timestamptz default now()
 );
 

@@ -49,10 +49,24 @@ export async function imageSearch(query, num = 10) {
 
     log({ event: 'success', traceId, count: results.length, duration_ms: Date.now() - start });
 
-    // Map Openverse fields to match Google style objects
+    // Map Openverse fields to match Google style objects, but include all metadata
     return results.map(i => ({
       url: i.url,
-      context: i.foreign_landing_url || null
+      context: i.foreign_landing_url || null,
+      id: i.id,
+      title: i.title || null,
+      creator: i.creator || null,
+      creator_url: i.creator_url || null,
+      license: i.license || null,
+      license_version: i.license_version || null,
+      license_url: i.license_url || null,
+      source: i.source || null,
+      category: i.category || null,
+      provider: i.provider || null,
+      thumbnail: i.thumbnail || null,
+      detail_url: i.detail_url || null,
+      width: i.width || null,
+      height: i.height || null
     }));
   } catch (err) {
     log({ event: 'error', traceId, name: err?.name, message: err?.message });
