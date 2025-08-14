@@ -734,7 +734,7 @@ app.get('/admin/recent', async (_req, res, next) => {
   }
 });
 
-app.use('/', (await import('./server/routes/admin/stylePrompts.js')).default);
+app.use('/admin/style-prompts', (await import('./server/routes/admin/stylePrompts.js')).default);
 app.use('/', (await import('./server/routes/admin/stylePromptsUI.js')).default);
 
 // ---------- Error handling ----------
