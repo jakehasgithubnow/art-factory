@@ -39,6 +39,36 @@ function isRetryable(err) {
  * @param {number} [options.timeoutMs=20000]
  * @param {number} [options.retries=2]
  */
+export async function getImageMetadata(publicId, {
+  exif = true,
+  context = true,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  retries = DEFAULT_RETRIES
+} = {}) {
+  if (!publicId) throw new Error('getImageMetadata: "publicId" is required');
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await cloudinary.v2.api.resource(publicId, {
+        resource_type: 'image',
+        exif,
+        context,
+        timeout: timeoutMs
+      });
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryable(err)) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('Unknown Cloudinary metadata retrieval error');
+}
+
 export async function uploadImage(
   image,
   {
