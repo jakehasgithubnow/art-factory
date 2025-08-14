@@ -62,11 +62,18 @@ router.patch('/:id/toggle', async (req, res) => {
 // Delete a prompt
 router.delete('/:id', async (req, res) => {
   try {
-    await stylePrompts.deletePrompt(req.params.id);
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
+    }
+    const deletedCount = await stylePrompts.deletePrompt(id);
+    if (deletedCount === 0) {
+      return res.status(404).json({ error: 'Prompt not found' });
+    }
     res.status(204).send();
   } catch (err) {
     console.error('Failed to delete style prompt', err);
-    res.status(500).json({ error: 'Failed to delete style prompt' });
+    res.status(500).json({ error: 'Failed to delete style prompt', details: err?.message });
   }
 });
 
