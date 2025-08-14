@@ -69,7 +69,8 @@ router.patch('/:id/toggle', async (req, res) => {
       return res.status(404).json({ error: 'Prompt not found' });
     }
 
-    res.json(prompt);
+    // If returning array or null, ensure JSON serializable object
+    res.json({ id: prompt.id, text: prompt.text, enabled: prompt.enabled, updated_at: prompt.updated_at });
   } catch (err) {
     console.error('Failed to toggle style prompt', err);
     res.status(500).json({ error: 'Failed to toggle style prompt', details: err?.message });
