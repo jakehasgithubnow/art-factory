@@ -48,6 +48,14 @@ async function load(){
       <img class="img" src="\${p.src_url}" alt=""/>
       <div class="meta">
         <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false} </div></div>
+        \${p.ov_id ? '<div class="row muted" style="font-size:12px;flex-direction:column;align-items:flex-start">'
+          + '<div><strong>Title:</strong> ' + (p.ov_title || '') + '</div>'
+          + '<div><strong>Creator:</strong> ' + (p.ov_creator || '') + '</div>'
+          + '<div><strong>License:</strong> ' + (p.ov_license || '') + ' ' + (p.ov_license_version || '') + '</div>'
+          + '<div><a href="' + (p.ov_license_url || '#') + '" target="_blank">License Link</a></div>'
+          + '<div><a href="' + (p.ov_detail_url || p.ov_source || '#') + '" target="_blank">Source</a></div>'
+          + '<div><strong>Dimensions:</strong> ' + (p.ov_width || '') + ' × ' + (p.ov_height || '') + '</div>'
+        + '</div>' : ''}
         <div class="row">
           <button data-act="approve" data-id="\${p.id}">Approve</button>
           <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>

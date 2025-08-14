@@ -34,7 +34,7 @@ function sanitizePlace(p) {
 }
 
 export default async function locations(job) {
-  const { catchmentId } = job.data;
+  const { catchmentId, imageSource } = job.data;
   const catchment = await db('catchments').where({ id: catchmentId }).first();
   if (!catchment) return;
 
@@ -69,7 +69,7 @@ The "search_term" should be what a person would type into an image search to fin
   for (const p of places) {
     try {
       const [loc] = await db('locations')
-        .insert({ ...p, catchment_id: catchmentId })
+        .insert({ ...p, catchment_id: catchmentId, image_source: catchment.image_source || imageSource || 'google' })
         .returning('*');
 
       if (loc && loc.id) {

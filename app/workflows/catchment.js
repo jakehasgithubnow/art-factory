@@ -39,5 +39,5 @@ export default async function catchment(job) {
     processed: true
   });
 
-  await qLocation.add('location', { catchmentId }, { jobId: `location:${catchmentId}` });
+  await qLocation.add('location', { catchmentId, imageSource: row.image_source || imageSource }, { jobId: `location:${catchmentId}` });
 }

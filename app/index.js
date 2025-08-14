@@ -654,8 +654,12 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
     const { valid, errors, name, lat, lon, intro } = validateCatchmentBody(req.body);
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
+    const image_source = ['google', 'openverse'].includes(req.body?.imageSource)
+      ? req.body.imageSource
+      : 'google';
+
     const insert = await db('catchments')
-      .insert({ name, lat, lon, intro })
+      .insert({ name, lat, lon, intro, image_source })
       .returning(['id']);
     const id = insert?.[0]?.id;
     if (!id) throw new Error('Failed to create catchment');
