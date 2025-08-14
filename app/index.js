@@ -371,6 +371,11 @@ app.get('/', (_req, res) => {
         </div>
         <label>Intro (optional)</label>
         <textarea id="intro" rows="3" placeholder="A sunlit city of tiles and hills." ></textarea>
+        <label>Image Source</label>
+        <select id="imageSource" style="width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:10px;margin-bottom:8px">
+          <option value="google" selected>Google</option>
+          <option value="openverse">Openverse</option>
+        </select>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button id="kick">Create Catchment</button>
           <button id="refresh" type="button">Refresh</button>
