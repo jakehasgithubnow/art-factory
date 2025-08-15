@@ -158,8 +158,8 @@ export async function createMockups({
     frameUrl2,
     frameUrl3,
     artUrl,
-    orientation,
-    enableInnerShadow
+    orientation: orientation || "horizontal",
+    enableInnerShadow: Boolean(enableInnerShadow)
   };
 
   const data = await postJsonWithRetry(
