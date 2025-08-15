@@ -29,9 +29,33 @@ export default async function publish(job) {
   const title = `${row.location_name} – Bomberg Series`;
   const bodyHtml = `${art.description ?? ''}<br><br><em>${row.location_description ?? ''}</em>`;
 
-  // Build images array (painting first, then staged mockups)
+  // Attempt mockup generation if none exist
   let mockups = [];
-  const mu = art.mockup_urls;
+  if (!art.mockup_urls || (Array.isArray(art.mockup_urls) && art.mockup_urls.length === 0) || (typeof art.mockup_urls === 'string' && art.mockup_urls.trim() === '')) {
+    try {
+      const { createMockups } = await import('../services/framemock.js');
+      const { frameMockUrl, frameMockApiKey } = (await import('../config/env.js')).env;
+      if (!frameMockUrl) {
+        console.error('publish: Missing env.frameMockUrl');
+      }
+      if (!frameMockApiKey) {
+        console.warn('publish: Missing env.frameMockApiKey - requests may fail if auth is required');
+      }
+      if (art.image_url) {
+        console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
+        const generated = await createMockups(art.image_url);
+        console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });
+        await db('artwork').where({ id: artworkId }).update({ mockup_urls: JSON.stringify(generated) });
+        mockups = generated;
+      } else {
+        console.error('publish: No image_url, cannot generate mockups', { artworkId });
+      }
+    } catch (err) {
+      console.error('publish: Mockup generation failed', { artworkId, error: err });
+    }
+  }
+
+  // Build images array (painting first, then staged mockups)
   if (Array.isArray(mu)) {
     mockups = mu.filter((u) => typeof u === 'string' && u);
   } else if (typeof mu === 'string') {
