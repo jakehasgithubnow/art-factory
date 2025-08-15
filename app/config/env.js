@@ -47,6 +47,9 @@ export const env = {
   // Frame-mock service
   frameMockUrl: optional('FRAME_MOCK_URL'),
   frameMockApiKey: optional('FRAME_MOCK_API_KEY'),
+  frameUrl1: optional('frameUrl1'),
+  frameUrl2: optional('frameUrl2'),
+  frameUrl3: optional('frameUrl3'),
 
   // Paint service
   paintEndpoint: optional('PAINT_ENDPOINT'),
