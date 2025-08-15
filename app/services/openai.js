@@ -2,8 +2,13 @@ import OpenAI from 'openai';
 import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
 
-const client = new OpenAI({ 
-  apiKey: env.openaiKey,
+const openaiClient = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || env.openaiKey,
+  baseURL: 'https://api.openai.com/v1'
+});
+
+const piapiClient = new OpenAI({
+  apiKey: process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey,
   baseURL: 'https://api-direct.piapi.ai/v1'
 });
 
@@ -131,7 +136,7 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
   const start = Date.now();
   log({ event: 'chat_start', traceId, model, temperature });
   try {
-    const { choices } = await client.chat.completions.create({
+    const { choices } = await openaiClient.chat.completions.create({
       model,
       temperature,
       messages: [
@@ -196,7 +201,7 @@ export async function chatJson({
     const attemptStart = Date.now();
     log({ event: 'chatJson_attempt', traceId, attempt: attempt + 1 });
     try {
-      const { choices } = await client.chat.completions.create({
+      const { choices } = await openaiClient.chat.completions.create({
         model,
         temperature,
         response_format,
@@ -240,4 +245,4 @@ export async function chatJson({
   }
 }
 
-export { client };
+export { openaiClient, piapiClient };
