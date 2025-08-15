@@ -51,24 +51,41 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
       return res.json({ ok: true, status: 'rejected' });
     }
 
+    console.log('moderationArtwork: approve branch entered', { id, action });
+
     await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
 
     // Fetch artwork to get image_url
     const art = await db('artwork').where({ id }).first();
     if (!art || !art.image_url) {
+      console.error('No image_url for artwork, cannot generate mockups', { id });
       throw new Error('No image_url for artwork, cannot generate mockups');
     }
 
+    // Check environment variables needed for framemock
+    const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+    if (!frameMockUrl) {
+      console.error('Missing env.frameMockUrl');
+    }
+    if (!frameMockApiKey) {
+      console.warn('Missing env.frameMockApiKey - requests may fail if auth is required');
+    }
+
     try {
+      console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
       const mockupUrls = await createMockups(art.image_url);
+      console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
       await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
       if (typeof req.log === 'function') {
         req.log({ event: 'generate_mockups', artworkId: id, mockupsCount: mockupUrls.length });
+      } else {
+        console.log('generate_mockups', { artworkId: id, mockupsCount: mockupUrls.length });
       }
     } catch (err) {
       if (typeof req.log === 'function') {
         req.log({ event: 'generate_mockups_failed', artworkId: id, error: err.message });
       }
+      console.error('generate_mockups_failed', { artworkId: id, error: err });
       throw err;
     }
 
