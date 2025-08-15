@@ -1,6 +1,6 @@
 import db from '../db/client.js';
-import pkg from '../services/n8n.js';
-const { sendProduct } = pkg;
+import * as n8n from '../services/n8n.js';
+const { sendProduct } = n8n;
 
 export default async function publish(job) {
   const { artworkId } = job.data;
