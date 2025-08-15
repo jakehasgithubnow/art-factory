@@ -1,6 +1,38 @@
 import fetch from 'node-fetch';
 
-// Existing exports might be here – ensure we don't overwrite them if present
+// Restore imageSearch alongside new getPlaceDetails
+
+/**
+ * Search Google Images (Custom Search API) for a query and return results.
+ * Expects GOOGLE_API_KEY and GOOGLE_CX in environment variables.
+ */
+export async function imageSearch(query, num = 10) {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  const cx = process.env.GOOGLE_CX;
+  if (!apiKey || !cx) {
+    throw new Error('Google API key (GOOGLE_API_KEY) or CX (GOOGLE_CX) not set');
+  }
+  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+    query
+  )}&searchType=image&num=${num}&key=${apiKey}&cx=${cx}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.items) return [];
+    return data.items.map(item => ({
+      url: item.link,
+      thumbnail: item.image?.thumbnailLink,
+      contextLink: item.image?.contextLink,
+      mime: item.mime,
+      width: item.image?.width,
+      height: item.image?.height
+    }));
+  } catch (err) {
+    console.error('[Google imageSearch] Error:', err);
+    return [];
+  }
+}
+
 // Add Google Places enrichment utility
 
 /**
