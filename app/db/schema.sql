@@ -38,6 +38,18 @@ create table if not exists locations (
   category     text,
   description  text,
   search_term  text,
+  -- Google Places enrichment fields
+  g_place_id text,
+  g_name text,
+  g_formatted_address text,
+  g_phone text,
+  g_website text,
+  g_lat numeric,
+  g_lng numeric,
+  g_rating numeric,
+  g_user_ratings_total integer,
+  g_types text,
+  g_photo_refs jsonb default '[]'::jsonb,
   processed    boolean not null default false,
   created_at   timestamptz default now()
 );

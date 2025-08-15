@@ -1,39 +1,72 @@
 import fetch from 'node-fetch';
-import { env } from '../config/env.js';
-import { randomUUID } from 'crypto';
 
-const STAGE = 'google_image_search';
-function log(data = {}) {
-  try {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      stage: STAGE,
-      ...data,
-    }));
-  } catch (_) {
-    // ignore logging errors
+// Existing exports might be here – ensure we don't overwrite them if present
+// Add Google Places enrichment utility
+
+/**
+ * Fetch detailed Google Places data for a given search term.
+ * 1. Text Search to find place_id
+ * 2. Place Details to get structured info
+ */
+export async function getPlaceDetails(searchTerm) {
+  if (!process.env.GOOGLE_PLACES_API_KEY) {
+    console.warn('[Google Places] API key not set in GOOGLE_PLACES_API_KEY');
+    return null;
   }
-}
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
 
-export async function imageSearch(query, num = 10) {
-  const traceId = randomUUID();
-  const start = Date.now();
-  log({ event: 'start', traceId, query, num });
   try {
-    const qs = new URLSearchParams({
-      key: env.googleKey,
-      cx: env.googleCseId,
-      searchType: 'image',
-      q: query,
-      num
-    });
-    const res = await fetch(`https://customsearch.googleapis.com/customsearch/v1?${qs}`);
-    log({ event: 'fetched', traceId, status: res.status, statusText: res.statusText });
-    const { items = [] } = await res.json();
-    log({ event: 'success', traceId, count: items.length, duration_ms: Date.now() - start });
-    return items.map(i => ({ url: i.link, context: i.image?.contextLink }));
+    // Step 1: Text Search
+    const textUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(searchTerm)}&key=${apiKey}`;
+    const textRes = await fetch(textUrl);
+    const textData = await textRes.json();
+    if (!textData.results || !textData.results.length) {
+      console.warn('[Google Places] No results for', searchTerm);
+      return null;
+    }
+    const placeId = textData.results[0].place_id;
+    if (!placeId) {
+      console.warn('[Google Places] Missing place_id for', searchTerm);
+      return null;
+    }
+
+    // Step 2: Place Details
+    const fields = [
+      'name',
+      'formatted_address',
+      'international_phone_number',
+      'website',
+      'geometry',
+      'opening_hours',
+      'rating',
+      'user_ratings_total',
+      'types',
+      'photos'
+    ].join(',');
+    const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${fields}&key=${apiKey}`;
+    const detailRes = await fetch(detailUrl);
+    const detailData = await detailRes.json();
+    if (detailData.status !== 'OK' || !detailData.result) {
+      console.warn('[Google Places] Place Details fetch failed for', searchTerm, detailData.status);
+      return null;
+    }
+
+    const r = detailData.result;
+    return {
+      g_place_id: placeId,
+      g_name: r.name || null,
+      g_formatted_address: r.formatted_address || null,
+      g_phone: r.international_phone_number || null,
+      g_website: r.website || null,
+      g_lat: r.geometry?.location?.lat ?? null,
+      g_lng: r.geometry?.location?.lng ?? null,
+      g_rating: r.rating ?? null,
+      g_user_ratings_total: r.user_ratings_total ?? null,
+      g_types: Array.isArray(r.types) ? r.types.join(',') : null,
+      g_photo_refs: Array.isArray(r.photos) ? r.photos.map(p => p.photo_reference) : []
+    };
   } catch (err) {
-    log({ event: 'error', traceId, name: err?.name, message: err?.message });
-    throw err;
+    console.error('[Google Places] Error fetching details for', searchTerm, err);
+    return null;
   }
 }

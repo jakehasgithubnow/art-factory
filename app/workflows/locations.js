@@ -1,6 +1,7 @@
 import db from '../db/client.js';
 import { chatJson } from '../services/openai.js';
 import { qPhoto } from '../queue/queues.js';
+import { getPlaceDetails } from '../services/google.js';
 
 const PLACES_SCHEMA = {
   type: 'array',
@@ -68,8 +69,24 @@ The "search_term" should be what a person would type into an image search to fin
 
   for (const p of places) {
     try {
+      // Enrich with Google Places data
+      let enrichment = {};
+      try {
+        const details = await getPlaceDetails(p.search_term || p.name);
+        if (details) {
+          enrichment = details;
+        }
+      } catch (e) {
+        console.warn('locations workflow: Google Places enrichment failed', { catchmentId, place: p?.name, err: e });
+      }
+
       const [loc] = await db('locations')
-        .insert({ ...p, catchment_id: catchmentId, image_source: catchment.image_source || imageSource || 'google' })
+        .insert({ 
+          ...p, 
+          catchment_id: catchmentId, 
+          image_source: catchment.image_source || imageSource || 'google',
+          ...enrichment
+        })
         .returning('*');
 
       if (loc && loc.id) {
