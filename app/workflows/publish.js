@@ -31,7 +31,9 @@ export default async function publish(job) {
 
   // Attempt mockup generation if none exist
   let mockups = [];
-  if (!art.mockup_urls || (Array.isArray(art.mockup_urls) && art.mockup_urls.length === 0) || (typeof art.mockup_urls === 'string' && art.mockup_urls.trim() === '')) {
+  let mu = art.mockup_urls;
+
+  if (!mu || (Array.isArray(mu) && mu.length === 0) || (typeof mu === 'string' && mu.trim() === '')) {
     try {
       const { createMockups } = await import('../services/framemock.js');
       const { frameMockUrl, frameMockApiKey } = (await import('../config/env.js')).env;
@@ -43,10 +45,18 @@ export default async function publish(job) {
       }
       if (art.image_url) {
         console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
-        const generated = await createMockups(art.image_url);
+        const { frameUrl1, frameUrl2, frameUrl3, defaultOrientation } = (await import('../config/env.js')).env;
+        const generated = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation: defaultOrientation || 'horizontal',
+          enableInnerShadow: true
+        });
         console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });
         await db('artwork').where({ id: artworkId }).update({ mockup_urls: JSON.stringify(generated) });
-        mockups = generated;
+        mu = generated;
       } else {
         console.error('publish: No image_url, cannot generate mockups', { artworkId });
       }

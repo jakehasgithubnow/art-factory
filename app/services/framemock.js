@@ -132,30 +132,46 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  * @param {{ timeoutMs?: number }} [opts]
  * @returns {Promise<string[]>} Array of mockup image URLs
  */
-export async function createMockups(paintingUrl, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function createMockups({
+  frameUrl1,
+  frameUrl2,
+  frameUrl3,
+  artUrl,
+  orientation = 'horizontal',
+  enableInnerShadow = true
+}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const traceId = randomUUID();
-  log({ event: 'createMockups_start', traceId, paintingHost: (() => { try { return new URL(paintingUrl).host; } catch { return 'invalid'; } })() });
+  log({ event: 'createMockups_start', traceId, artHost: (() => { try { return new URL(artUrl).host; } catch { return 'invalid'; } })() });
 
   if (!env.frameMockUrl) {
     throw new Error('Missing env.frameMockUrl');
   }
-  assertAbsoluteHttpUrl(paintingUrl);
+  assertAbsoluteHttpUrl(artUrl);
 
   const headers = {};
   if (env.frameMockApiKey) {
     headers['Authorization'] = `Bearer ${env.frameMockApiKey}`;
   }
 
+  const payload = {
+    frameUrl1,
+    frameUrl2,
+    frameUrl3,
+    artUrl,
+    orientation,
+    enableInnerShadow
+  };
+
   const data = await postJsonWithRetry(
     env.frameMockUrl,
-    { image: paintingUrl },
+    payload,
     { timeoutMs, headers }
   );
 
-  const mockups = data?.mockups;
-  if (!Array.isArray(mockups) || mockups.some((m) => typeof m !== 'string')) {
-    throw new Error('Frame mock-up response missing a valid "mockups" string array');
+  const mockups = [data?.imageUrl1, data?.imageUrl2, data?.imageUrl3].filter((m) => typeof m === 'string' && m);
+  if (mockups.length === 0) {
+    throw new Error('Frame mock-up response missing valid imageUrl fields');
   }
-  log({ event: 'createMockups_success', traceId, mockups: Array.isArray(mockups) ? mockups.length : 0 });
+  log({ event: 'createMockups_success', traceId, mockups: mockups.length });
   return mockups;
 }
