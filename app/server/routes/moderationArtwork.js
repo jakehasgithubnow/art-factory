@@ -59,34 +59,32 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
     const art = await db('artwork').where({ id }).first();
     if (!art || !art.image_url) {
       console.error('No image_url for artwork, cannot generate mockups', { id });
-      throw new Error('No image_url for artwork, cannot generate mockups');
-    }
-
-    // Check environment variables needed for framemock
-    const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
-    if (!frameMockUrl) {
-      console.error('Missing env.frameMockUrl');
-    }
-    if (!frameMockApiKey) {
-      console.warn('Missing env.frameMockApiKey - requests may fail if auth is required');
-    }
-
-    try {
-      console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
-      const mockupUrls = await createMockups(art.image_url);
-      console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
-      await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
-      if (typeof req.log === 'function') {
-        req.log({ event: 'generate_mockups', artworkId: id, mockupsCount: mockupUrls.length });
-      } else {
-        console.log('generate_mockups', { artworkId: id, mockupsCount: mockupUrls.length });
+    } else {
+      // Check environment variables needed for framemock
+      const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+      if (!frameMockUrl) {
+        console.error('Missing env.frameMockUrl');
       }
-    } catch (err) {
-      if (typeof req.log === 'function') {
-        req.log({ event: 'generate_mockups_failed', artworkId: id, error: err.message });
+      if (!frameMockApiKey) {
+        console.warn('Missing env.frameMockApiKey - requests may fail if auth is required');
       }
-      console.error('generate_mockups_failed', { artworkId: id, error: err });
-      throw err;
+
+      try {
+        console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
+        const mockupUrls = await createMockups(art.image_url);
+        console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
+        await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_mockups', artworkId: id, mockupsCount: mockupUrls.length });
+        } else {
+          console.log('generate_mockups', { artworkId: id, mockupsCount: mockupUrls.length });
+        }
+      } catch (err) {
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_mockups_failed', artworkId: id, error: err.message });
+        }
+        console.error('generate_mockups_failed', { artworkId: id, error: err });
+      }
     }
 
     await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
