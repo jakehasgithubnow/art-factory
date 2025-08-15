@@ -1,5 +1,5 @@
 import db from '../db/client.js';
-import { createProduct } from '../services/shopify.js';
+import { sendProduct } from '../services/n8n.js';
 
 export default async function publish(job) {
   const { artworkId } = job.data;
@@ -90,17 +90,52 @@ export default async function publish(job) {
   // Optional tags for easier cataloging
   const tags = [row.location_name, 'Bomberg', 'generated'].filter(Boolean);
 
-  let shopifyId;
+  // Build payload in n8n expected format
+  const payload = {
+    product: {
+      title,
+      body_html: bodyHtml,
+      options: [
+        { name: 'Format', values: ['Original Painting', 'Prints'] },
+        { name: 'Size', values: ['10 x 15cm', '20 x 30cm', '27 x 35cm', '33 x 43cm', '50 x 60cm'] }
+      ],
+      variants: [
+        { option1: 'Original Painting', option2: '20 x 30cm', price: '70.00' },
+        { option1: 'Original Painting', option2: '27 x 35cm', price: '90.00' },
+        { option1: 'Original Painting', option2: '33 x 43cm', price: '140.00' },
+        { option1: 'Original Painting', option2: '50 x 60cm', price: '190.00' },
+        { option1: 'Prints', option2: '10 x 15cm', price: '6.00' },
+        { option1: 'Prints', option2: '20 x 30cm', price: '9.00' },
+        { option1: 'Prints', option2: '27 x 35cm', price: '15.00' },
+        { option1: 'Prints', option2: '33 x 43cm', price: '35.00' }
+      ],
+      images: images.map(img => ({ src: img.src }))
+    },
+    location_title: row.location_name || '',
+    google_id: '',
+    country: '',
+    state: '',
+    city: '',
+    formatted_address: '',
+    latitude: row.catchment_lat || '',
+    longitude: row.catchment_lon || '',
+    location_category: '',
+    location_description: row.location_description || '',
+    location_photo: '',
+    style_name: '',
+    uuid: String(artworkId),
+    featured: ''
+  };
+
   try {
-    shopifyId = await createProduct({ title, bodyHtml, images, metafields, tags, status: 'draft', productType: 'Art Print' });
+    await sendProduct(payload);
   } catch (err) {
-    // Add context for easier debugging in logs
-    console.error('publish: createProduct failed', { artworkId, err });
+    console.error('publish: sendProduct to n8n failed', { artworkId, err });
     throw err;
   }
 
-  // Mark as published/idempotent once we have a product id
+  // Mark as published/idempotent once webhook has been successfully sent
   await db('artwork')
     .where({ id: artworkId })
-    .update({ shopify_id: shopifyId, published: true });
+    .update({ published: true });
 }
