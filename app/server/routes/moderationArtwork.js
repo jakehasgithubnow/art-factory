@@ -2,6 +2,7 @@ import express from 'express';
 import db from '../../db/client.js';
 import { qPublish } from '../../queue/queues.js';
 import { requireApiKey } from '../middleware/requireApiKey.js';
+import { createMockups } from '../../services/framemock.js';
 
 const router = express.Router();
 
@@ -51,6 +52,26 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
     }
 
     await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
+
+    // Fetch artwork to get image_url
+    const art = await db('artwork').where({ id }).first();
+    if (!art || !art.image_url) {
+      throw new Error('No image_url for artwork, cannot generate mockups');
+    }
+
+    try {
+      const mockupUrls = await createMockups(art.image_url);
+      await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'generate_mockups', artworkId: id, mockupsCount: mockupUrls.length });
+      }
+    } catch (err) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'generate_mockups_failed', artworkId: id, error: err.message });
+      }
+      throw err;
+    }
+
     await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
     if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'approve', enqueuedPublish: true, duration_ms: Date.now() - t0 });
     res.json({ ok: true, status: 'approved' });
