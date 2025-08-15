@@ -1,10 +1,10 @@
-const axios = require('axios');
+import axios from 'axios';
 
 /**
  * Sends the processed artwork payload to the n8n webhook.
  * @param {Object} payload - The full JSON body matching the expected n8n format.
  */
-async function sendProduct(payload) {
+export async function sendProduct(payload) {
   try {
     const res = await axios.post(
       'https://n8n101301.hostkey.in/webhook/7686524a-8012-485a-bc49-076d980323f8',
@@ -22,5 +22,3 @@ async function sendProduct(payload) {
     }
   }
 }
-
-module.exports = { sendProduct };
