@@ -2,7 +2,10 @@ import OpenAI from 'openai';
 import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
 
-const client = new OpenAI({ apiKey: env.openaiKey });
+const client = new OpenAI({ 
+  apiKey: env.openaiKey,
+  baseURL: 'https://api-direct.piapi.ai/v1'
+});
 
 const STAGE = 'openai';
 function log(data = {}) {
