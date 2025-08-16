@@ -19,7 +19,7 @@ const PLACES_SCHEMA = {
           description: { type: 'string' },
           search_term: { type: 'string' },
         },
-        required: ['name', 'search_term'],
+        required: ['name', 'address', 'category', 'description', 'search_term'],
         additionalProperties: false,
       },
     },
