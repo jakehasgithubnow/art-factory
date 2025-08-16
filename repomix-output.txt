@@ -81,6 +81,9 @@ app/
       moderationArtworkUI.js
       moderationPhotos.js
       moderationUI.js
+    utils/
+      error.js
+      logger.js
     app.js
   services/
     artworkTracker.js
@@ -1471,6 +1474,32 @@ load();
 export default router;
 
 ================
+File: app/server/utils/error.js
+================
+export function enhanceError(err, context = {}) {
+  const e = err instanceof Error ? err : new Error(String(err));
+  try {
+    e.context = { ...(e.context || {}), ...context };
+  } catch {
+    // Fallback in case property assignment fails
+    e.extraContext = context;
+  }
+  return e;
+}
+
+================
+File: app/server/utils/logger.js
+================
+export function log(entry) {
+  const timestamp = new Date().toISOString();
+  try {
+    console.log(`[${timestamp}]`, JSON.stringify(entry));
+  } catch {
+    console.log(`[${timestamp}]`, entry);
+  }
+}
+
+================
 File: app/server/app.js
 ================
 import express from 'express';
@@ -2078,6 +2107,11 @@ export async function sendProduct(payload) {
 ================
 File: app/services/openai.js
 ================
+import { randomUUID } from 'crypto';
+import { log } from '../server/utils/logger.js';
+import { env } from '../config/env.js';
+import { enhanceError } from '../server/utils/error.js';
+
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
   const start = Date.now();
@@ -2861,7 +2895,11 @@ export default async function artwork(job) {
       }
     }
 
-    console.log(`[artwork] Paint service response status: ${res.status}`);
+    if (res && typeof res.status !== "undefined") {
+      console.log(`[artwork] Paint service response status: ${res.status}`);
+    } else {
+      console.log("[artwork] Skipping status log (no new response object)");
+    }
 
     if (usePiapi) {
       // --- RETRY LOGIC for PiAPI ---
