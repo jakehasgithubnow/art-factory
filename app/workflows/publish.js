@@ -154,12 +154,12 @@ export default async function publish(job) {
     },
     location_title: row.location_name || '',
     google_id: row.google_id || '',
-    country: row.country || '',
-    state: row.state || '',
-    city: row.city || '',
+    country: '', // not available without parsing
+    state: '',   // not available without parsing
+    city: '',    // not available without parsing
     formatted_address: row.formatted_address || '',
-    latitude: row.catchment_lat || '',
-    longitude: row.catchment_lon || '',
+    latitude: row.latitude || '',
+    longitude: row.longitude || '',
     location_category: row.location_category || '',
     location_description: row.location_description || '',
     location_photo: row.location_photo || '',
