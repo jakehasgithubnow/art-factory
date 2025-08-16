@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { log } from '../server/utils/logger.js';
 import { env } from '../config/env.js';
+import { enhanceError } from '../server/utils/error.js';
 
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
