@@ -146,26 +146,26 @@ export default async function publish(job) {
       ],
       images: [
         { src: art.image_url },
-        ...(art.image1 ? [{ src: art.image1 }] : []),
-        ...(art.image2 ? [{ src: art.image2 }] : []),
-        ...(art.image3 ? [{ src: art.image3 }] : []),
+        ...(mockups[0] ? [{ src: mockups[0] }] : []),
+        ...(mockups[1] ? [{ src: mockups[1] }] : []),
+        ...(mockups[2] ? [{ src: mockups[2] }] : []),
         { src: "https://res.cloudinary.com/dyvp677di/image/upload/w_900/v1747827728/canvas_back_hfrqy8.png" }
       ]
     },
     location_title: row.location_name || '',
-    google_id: '',
-    country: '',
-    state: '',
-    city: '',
-    formatted_address: '',
+    google_id: row.google_id || '',
+    country: row.country || '',
+    state: row.state || '',
+    city: row.city || '',
+    formatted_address: row.formatted_address || '',
     latitude: row.catchment_lat || '',
     longitude: row.catchment_lon || '',
-    location_category: '',
+    location_category: row.location_category || '',
     location_description: row.location_description || '',
-    location_photo: '',
+    location_photo: row.location_photo || '',
     style_name: '',
     uuid: String(artworkId),
-    featured: ''
+    featured: art.featured || ''
   };
 
   try {
