@@ -18,9 +18,15 @@ export default async function publish(job) {
     .first({
       location_name: 'l.name',
       location_description: 'l.description',
-      catchment_lat: 'c.lat',
-      catchment_lon: 'c.lon',
+      location_category: 'l.category',
+      formatted_address: 'l.g_formatted_address',
+      google_id: 'l.g_place_id',
+      latitude: 'l.g_lat',
+      longitude: 'l.g_lng',
+      location_photo: db.raw("(l.g_photo_refs->>0)")
     });
+
+  console.log("DEBUG publish: resolved location row", row);
 
   if (!row) {
     throw new Error(`Unable to resolve location/catchment for photo ${art.photo_id}`);
