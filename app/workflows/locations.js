@@ -4,19 +4,25 @@ import { qPhoto } from '../queue/queues.js';
 import { getPlaceDetails } from '../services/google.js';
 
 const PLACES_SCHEMA = {
-  type: 'array',
-  items: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      name: { type: 'string' },
-      address: { type: 'string' },
-      category: { type: 'string' },
-      description: { type: 'string' },
-      search_term: { type: 'string' },
+  type: 'object',
+  properties: {
+    places: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          address: { type: 'string' },
+          category: { type: 'string' },
+          description: { type: 'string' },
+          search_term: { type: 'string' },
+        },
+        required: ['name', 'search_term'],
+      },
     },
-    required: ['name', 'search_term'],
   },
+  required: ['places'],
 };
 
 function sanitizePlace(p) {
@@ -50,11 +56,14 @@ The "search_term" should be what a person would type into an image search to fin
   let places = [];
   try {
     const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0 });
-    if (!Array.isArray(raw)) return;
+    if (!raw || !Array.isArray(raw.places)) {
+      console.error('locations workflow: invalid response format', { catchmentId, raw });
+      return;
+    }
 
     // sanitize, dedupe, cap at 10
     const seen = new Set();
-    for (const item of raw) {
+    for (const item of raw.places) {
       const p = sanitizePlace(item);
       if (!p) continue;
       const key = `${p.name.toLowerCase()}|${p.address.toLowerCase()}`;
