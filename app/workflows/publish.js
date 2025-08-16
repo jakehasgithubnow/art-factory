@@ -19,7 +19,9 @@ export default async function publish(job) {
       location_name: 'l.name',
       location_description: 'l.description',
       location_category: 'l.category',
-      formatted_address: 'l.address'
+      formatted_address: 'l.address',
+      latitude: 'l.g_lat',
+      longitude: 'l.g_lng'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -160,8 +162,8 @@ export default async function publish(job) {
     state: '',     // not in schema
     city: '',      // not in schema
     formatted_address: row.formatted_address || '',
-    latitude: '',  // not in schema
-    longitude: '', // not in schema
+    latitude: row.latitude ?? '',
+    longitude: row.longitude ?? '',
     location_category: row.location_category || '',
     location_description: row.location_description || '',
     location_photo: row.image_source || '', // from schema
