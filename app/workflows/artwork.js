@@ -168,15 +168,24 @@ export default async function artwork(job) {
 
       // Description
       const mainPaintingUrl = promptFinalUrls[0];
-      // Load system prompt for artwork description from DB
-      const { getByKey } = await import('../db/systemPrompts.js');
-      const sysPromptRow = await getByKey('artwork_description_system');
-      const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
+      let description = '';
+      if (mainPaintingUrl) {
+        // Load system prompt for artwork description from DB
+        const { getByKey } = await import('../db/systemPrompts.js');
+        const sysPromptRow = await getByKey('artwork_description_system');
+        const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
 
-      const description = await chat(
-        sysPrompt,
-        `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
-      );
+        try {
+          description = await chat(
+            sysPrompt,
+            `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+          );
+        } catch (e) {
+          console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
+        }
+      } else {
+        console.warn('[artwork] No mainPaintingUrl found, skipping description generation.');
+      }
 
       // Mark complete
       try {
@@ -203,19 +212,10 @@ export default async function artwork(job) {
         }
 
         if (i === 0) {
-          // Delay mockup creation until after moderation approval
-          const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
-          if (moderateArtwork) {
-            try { 
-              await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); 
-            } catch {}
-          } else {
-            // If moderation is disabled, generate mockups immediately
-            let mockups = [];
-            try { mockups = await createMockups(url); } catch {}
-            await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-            await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
-          }
+          // Always require moderation approval before mockup/publish
+          try {
+            await db('artwork').where({ id: artId }).update({ approved_for_publish: false });
+          } catch {}
         }
       }
     }
@@ -437,23 +437,9 @@ export default async function artwork(job) {
       .orderBy('id', 'desc')
       .limit(1)
       .select('id');
-    // 4. Mock-ups next (best-effort) -- only for first image
-    // Delay mockup creation until after moderation approval
-    const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
-    if (moderateArtwork) {
-      console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
-      try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
-    } else {
-      console.log('[artwork] Skipping artwork moderation. Generating mockups immediately...');
-      let mockups = [];
-      try {
-        mockups = await createMockups(mainPaintingUrl);
-      } catch (e) {
-        console.warn('createMockups failed', e);
-      }
-      await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-      await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
-    }
+    // 4. Moderation required before mockup/publish
+    console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
+    try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
   } catch (err) {
     // Clear in-progress tracker entry on failure
     try {
