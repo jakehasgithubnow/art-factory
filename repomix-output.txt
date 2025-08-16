@@ -52,6 +52,7 @@ app/
     env.js
   db/
     migrations/
+      20250816_add_g_lat_g_lng.sql
       20250816_drop_artwork_photoid_unique.sql
     client.js
     schema.sql
@@ -205,6 +206,14 @@ export const env = {
     publish: num('CONCURRENCY_PUBLISH', 2),
   },
 };
+
+================
+File: app/db/migrations/20250816_add_g_lat_g_lng.sql
+================
+-- Migration: Ensure locations table has Google coordinates fields
+ALTER TABLE locations
+  ADD COLUMN IF NOT EXISTS g_lat numeric,
+  ADD COLUMN IF NOT EXISTS g_lng numeric;
 
 ================
 File: app/db/migrations/20250816_drop_artwork_photoid_unique.sql
@@ -3183,19 +3192,27 @@ import { qPhoto } from '../queue/queues.js';
 import { getPlaceDetails } from '../services/google.js';
 
 const PLACES_SCHEMA = {
-  type: 'array',
-  items: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      name: { type: 'string' },
-      address: { type: 'string' },
-      category: { type: 'string' },
-      description: { type: 'string' },
-      search_term: { type: 'string' },
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    places: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          address: { type: 'string' },
+          category: { type: 'string' },
+          description: { type: 'string' },
+          search_term: { type: 'string' },
+        },
+        required: ['name', 'address', 'category', 'description', 'search_term'],
+        additionalProperties: false,
+      },
     },
-    required: ['name', 'search_term'],
   },
+  required: ['places'],
 };
 
 function sanitizePlace(p) {
@@ -3229,11 +3246,14 @@ The "search_term" should be what a person would type into an image search to fin
   let places = [];
   try {
     const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0 });
-    if (!Array.isArray(raw)) return;
+    if (!raw || !Array.isArray(raw.places)) {
+      console.error('locations workflow: invalid response format', { catchmentId, raw });
+      return;
+    }
 
     // sanitize, dedupe, cap at 10
     const seen = new Set();
-    for (const item of raw) {
+    for (const item of raw.places) {
       const p = sanitizePlace(item);
       if (!p) continue;
       const key = `${p.name.toLowerCase()}|${p.address.toLowerCase()}`;

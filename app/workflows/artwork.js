@@ -246,11 +246,11 @@ export default async function artwork(job) {
           const body = {
             model: 'gpt-4o-image',
             messages: [
+
               {
                 role: 'user',
                 content: [
-                  { type: 'image_url', image_url: { url: imageSource } },
-                  { type: 'text', text: 'Generate a framed fine-art style painting based on this reference photo. Output an image' }
+                  { type: 'image_url', image_url: { url: imageSource } }
                 ]
               }
             ],
