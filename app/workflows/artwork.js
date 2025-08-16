@@ -220,7 +220,11 @@ export default async function artwork(job) {
       }
     }
 
-    console.log(`[artwork] Paint service response status: ${res.status}`);
+    if (res && typeof res.status !== "undefined") {
+      console.log(`[artwork] Paint service response status: ${res.status}`);
+    } else {
+      console.log("[artwork] Skipping status log (no new response object)");
+    }
 
     if (usePiapi) {
       // --- RETRY LOGIC for PiAPI ---
