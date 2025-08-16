@@ -1,3 +1,53 @@
+export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'chat_start', traceId, model, temperature });
+
+  // Prefer configured OpenAI base URL; fall back to the public API
+  const endpoint =
+    process.env.OPENAI_BASE_URL ||
+    env.openaiBaseUrl ||
+    'https://api.openai.com/v1/chat/completions';
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    });
+
+    if (!resp.ok) {
+      const preview = await (async () => { try { return await resp.text(); } catch { return ''; } })();
+      log({ event: 'chat_http_error', traceId, status: resp.status, preview: preview?.slice(0, 400) });
+      throw new Error(`Chat request failed with status ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content;
+    const text = Array.isArray(content)
+      ? content.map(p => (typeof p?.text === 'string' ? p.text : '')).join('').trim()
+      : String(content || '').trim();
+
+    if (!text) throw new Error('Empty response from model');
+
+    log({ event: 'chat_success', traceId, duration_ms: Date.now() - start, content_len: text.length });
+    return text;
+  } catch (err) {
+    log({ event: 'chat_error', traceId, message: err?.message });
+    throw enhanceError(err, { stage: 'chat', model });
+  }
+}
+
 export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
   const traceId = randomUUID();
   const start = Date.now();
