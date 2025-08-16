@@ -5,6 +5,7 @@ import { getPlaceDetails } from '../services/google.js';
 
 const PLACES_SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   properties: {
     places: {
       type: 'array',
@@ -19,6 +20,7 @@ const PLACES_SCHEMA = {
           search_term: { type: 'string' },
         },
         required: ['name', 'search_term'],
+        additionalProperties: false,
       },
     },
   },
