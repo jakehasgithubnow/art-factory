@@ -9,7 +9,7 @@ const openaiClient = new OpenAI({
 
 const piapiClient = new OpenAI({
   apiKey: process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey,
-  baseURL: 'https://api-direct.piapi.ai/v1'
+  baseURL: 'https://api-direct.piapi.ai/v1/chat/completions'
 });
 
 const STAGE = 'openai';

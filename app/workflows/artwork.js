@@ -198,8 +198,13 @@ export default async function artwork(job) {
 
       // Description
       const mainPaintingUrl = promptFinalUrls[0];
+      // Load system prompt for artwork description from DB
+      const { getByKey } = await import('../db/systemPrompts.js');
+      const sysPromptRow = await getByKey('artwork_description_system');
+      const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
+
       const description = await chat(
-        'Describe a painting in 35 words.',
+        sysPrompt,
         `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
       );
 

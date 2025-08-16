@@ -12,6 +12,22 @@ create table if not exists catchments (
   created_at timestamptz default now()
 );
 
+-- System prompts table
+CREATE TABLE IF NOT EXISTS system_prompts (
+  id SERIAL PRIMARY KEY,
+  key TEXT UNIQUE NOT NULL,
+  text TEXT NOT NULL,
+  enabled BOOLEAN DEFAULT TRUE,
+  updated_at TIMESTAMP DEFAULT now()
+);
+
+-- Seed default system prompts
+INSERT INTO system_prompts (key, text) VALUES
+  ('location_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.'),
+  ('artwork_description_system', 'Describe a painting in 35 words.'),
+  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.')
+ON CONFLICT(key) DO NOTHING;
+
 -- Guardrails for geo ranges (no-op if already present)
 alter table catchments drop constraint if exists catchments_lat_range;
 alter table catchments add constraint catchments_lat_range check (lat >= -90 and lat <= 90);
