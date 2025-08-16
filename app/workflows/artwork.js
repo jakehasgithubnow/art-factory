@@ -1,6 +1,6 @@
 import db from '../db/client.js';
 import fetch from 'node-fetch';
-import { chat } from '../services/openai.js';
+import { chat, generateImage } from '../services/openai.js';
 import { createMockups } from '../services/framemock.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
@@ -106,30 +106,17 @@ export default async function artwork(job) {
             console.warn('[artwork][DEBUG] Error checking image URL reachability:', e);
           }
           // --- DEBUG LOGS END ---
-          console.log(`[artwork] Sending request to PiAPI paint endpoint with style prompt: ${stylePrompt.text}`);
-          const body = {
-            model: 'gpt-4o-image',
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { type: 'image_url', image_url: { url: imageSource } },
-                  { type: 'text', text: stylePrompt.text }
-                ]
-              }
-            ],
-            stream: true
-          };
-          res = await fetch(PAINT_ENDPOINT, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'text/event-stream',
-              'Authorization': `Bearer ${PAINT_API_KEY}`
-            },
-            body: JSON.stringify(body),
-            signal: controller.signal
-          });
+          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${stylePrompt.text}`);
+          const imageUrl = await generateImage(
+            `${stylePrompt.text}. Use reference photo: ${imageSource}`
+          );
+          if (imageUrl) {
+            res = { status: 200, ok: true }; // simulate
+            promptPaintingUrls = [imageUrl];
+          } else {
+            res = { status: 500, ok: false };
+            console.warn('[artwork] No imageUrl returned from PiAPI generateImage()');
+          }
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
           res = await fetch(PAINT_ENDPOINT, {

@@ -245,4 +245,65 @@ export async function chatJson({
   }
 }
 
+/**
+ * PiAPI image generation helper (streaming).
+ * Consumes SSE stream and extracts image_url(s).
+ */
+export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: "generateImage_start", traceId, model });
+
+  const resp = await fetch("https://api.piapi.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: prompt }],
+        },
+      ],
+      stream: true,
+    }),
+  });
+
+  let imageUrl = null;
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of resp.body) {
+      const lines = decoder.decode(chunk).split("\\n");
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const trimmed = line.replace("data:", "").trim();
+        if (trimmed === "[DONE]") continue;
+        try {
+          const data = JSON.parse(trimmed);
+          const content = data.choices?.[0]?.delta?.content;
+          if (Array.isArray(content)) {
+            for (const part of content) {
+              if (part.type === "image_url" && part.image_url?.url) {
+                imageUrl = part.image_url.url;
+                log({ event: "generateImage_found_url", traceId, imageUrl });
+              }
+            }
+          }
+        } catch (e) {
+          log({ event: "generateImage_chunk_parse_failed", traceId, line: trimmed.slice(0, 200) });
+        }
+      }
+    }
+  } catch (err) {
+    log({ event: "generateImage_error", traceId, message: err?.message });
+    throw enhanceError(err, { stage: "generateImage", model });
+  }
+
+  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, hasImage: Boolean(imageUrl) });
+  return imageUrl;
+}
+
 export { openaiClient, piapiClient };
