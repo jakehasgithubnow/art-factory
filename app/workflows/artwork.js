@@ -112,14 +112,14 @@ export default async function artwork(job) {
             `${stylePrompt.text}. Use reference photo: ${imageSource}`
           );
           // ensure promptPaintingUrls is always defined safely
-          var promptPaintingUrls = [];
+          let localPromptPaintingUrls = [];
           if (imageUrl) {
-            promptPaintingUrls = [imageUrl];
+            localPromptPaintingUrls = [imageUrl];
           } else {
             console.warn('[artwork] No imageUrl returned from PiAPI generateImage()');
           }
           // Wrap res so downstream code that expects res.status doesn't crash
-          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null, promptPaintingUrls };
+          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null, promptPaintingUrls: localPromptPaintingUrls };
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
           res = await fetch(PAINT_ENDPOINT, {
