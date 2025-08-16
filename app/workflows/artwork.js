@@ -110,13 +110,14 @@ export default async function artwork(job) {
           const imageUrl = await generateImage(
             `${stylePrompt.text}. Use reference photo: ${imageSource}`
           );
+          let promptPaintingUrls = [];
           if (imageUrl) {
-            res = { status: 200, ok: true }; // simulate
             promptPaintingUrls = [imageUrl];
           } else {
-            res = { status: 500, ok: false };
             console.warn('[artwork] No imageUrl returned from PiAPI generateImage()');
           }
+          // Wrap res so downstream code that expects res.status doesn't crash
+          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null };
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
           res = await fetch(PAINT_ENDPOINT, {
@@ -136,31 +137,10 @@ export default async function artwork(job) {
       // Removed redundant post-loop res.status log to prevent ReferenceError when res is undefined
 
       // Handle PiAPI SSE stream parsing
-      let promptPaintingUrls = [];
+      let promptPaintingUrls = promptPaintingUrls || [];
       let promptFinalUrls = [];
 
-      if (usePiapi) {
-        let chunks = '';
-        for await (const chunk of res.body) {
-          chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-        }
-        // Extract URLs
-        let urlMatches = chunks.match(/https?:\/\/[^\s"'()\\]+/g) || [];
-        let imgCandidates = urlMatches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
-
-        const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
-        for (const line of jsonLines) {
-          try {
-            const obj = JSON.parse(line.replace(/^data:\s*/, ''));
-            const str = JSON.stringify(obj);
-            const matches = str.match(/https?:\/\/[^\s"'()\\]+/g) || [];
-            matches.forEach(m => {
-              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(m)) imgCandidates.push(m);
-            });
-          } catch {}
-        }
-        promptPaintingUrls = [...new Set(imgCandidates.map(normalizeUrl))];
-      } else {
+      if (!usePiapi) {
         const data = await res.json();
         if (data && data.painting_url) promptPaintingUrls = [normalizeUrl(data.painting_url)];
       }
