@@ -1,6 +1,6 @@
 import express from 'express';
 import { requireApiKey } from '../../middleware/requireApiKey.js';
-import { getAll as getStylePrompts } from '../../../db/stylePrompts.js';
+import { getAll as getStylePrompts, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
 import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
 
 const router = express.Router();
@@ -31,9 +31,18 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
           </form>
 
           <h1>Style Prompts</h1>
-          <ul>
-            ${stylePrompts.map(p => `<li>${p.text} (${p.enabled ? 'enabled' : 'disabled'})</li>`).join('')}
-          </ul>
+          <form method="POST" action="/admin/style-prompts-ui/update">
+            ${stylePrompts.map(p => `
+              <div>
+                <label for="style-${p.id}">Prompt #${p.id}</label><br/>
+                <textarea name="text_${p.id}" rows="2" cols="80">${p.text}</textarea><br/>
+                <label>
+                  <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
+                </label>
+              </div>
+            `).join('')}
+            <button type="submit">Save Style Prompts</button>
+          </form>
         </body>
       </html>
     `);
@@ -49,6 +58,27 @@ router.post('/admin/system-prompts-ui/update', requireApiKey, async (req, res, n
     for (const [key, text] of updates) {
       if (text) {
         await updateSystemPrompt(key, text, true);
+      }
+    }
+    res.redirect('/admin/style-prompts-ui');
+  } catch (err) {
+    next(err);
+  }
+});
+
+  
+// Handle updates for style prompts
+router.post('/admin/style-prompts-ui/update', requireApiKey, async (req, res, next) => {
+  try {
+    for (const key of Object.keys(req.body)) {
+      if (key.startsWith('text_')) {
+        const id = key.split('_')[1];
+        const text = req.body[`text_${id}`];
+        const enabled = req.body[`enabled_${id}`] !== undefined;
+        if (text) {
+          await updateStylePrompt(id, text);
+        }
+        await toggleStylePrompt(id, enabled);
       }
     }
     res.redirect('/admin/style-prompts-ui');
