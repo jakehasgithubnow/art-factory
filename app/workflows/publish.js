@@ -144,7 +144,13 @@ export default async function publish(job) {
         { option1: 'Prints', option2: '27 x 35cm', price: '15.00' },
         { option1: 'Prints', option2: '33 x 43cm', price: '35.00' }
       ],
-      images: images.map(img => ({ src: img.src }))
+      images: [
+        { src: art.image_url },
+        ...(art.image1 ? [{ src: art.image1 }] : []),
+        ...(art.image2 ? [{ src: art.image2 }] : []),
+        ...(art.image3 ? [{ src: art.image3 }] : []),
+        { src: "https://res.cloudinary.com/dyvp677di/image/upload/w_900/v1747827728/canvas_back_hfrqy8.png" }
+      ]
     },
     location_title: row.location_name || '',
     google_id: '',
