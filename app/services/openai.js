@@ -1,304 +1,111 @@
-import OpenAI from 'openai';
-import { env } from '../config/env.js';
-import { randomUUID } from 'crypto';
-
-const openaiClient = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || env.openaiKey,
-  baseURL: 'https://api.openai.com/v1'
-});
-
-const piapiClient = new OpenAI({
-  apiKey: process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey,
-  baseURL: 'https://api-direct.piapi.ai/v1/chat/completions'
-});
-
-const STAGE = 'openai';
-function log(data = {}) {
-  try {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      stage: STAGE,
-      ...data,
-    }));
-  } catch (_) {
-    // best-effort logging only
-  }
-}
-
-function enhanceError(err, context = {}) {
-  const e = new Error(
-    `OpenAI request failed${context.stage ? ` at ${context.stage}` : ''}: ${err?.message || err}`
-  );
-  e.cause = err;
-  e.context = context;
-  return e;
-}
-
-function extractBalancedJson(text) {
-  if (typeof text !== 'string') return null;
-  const tryBraces = () => {
-    const start = text.indexOf('{');
-    if (start === -1) return null;
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (ch === '{') depth++;
-      else if (ch === '}') {
-        depth--;
-        if (depth === 0) {
-          return text.slice(start, i + 1);
-        }
-      }
-    }
-    return null;
-  };
-  const tryBrackets = () => {
-    const start = text.indexOf('[');
-    if (start === -1) return null;
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (ch === '[') depth++;
-      else if (ch === ']') {
-        depth--;
-        if (depth === 0) {
-          return text.slice(start, i + 1);
-        }
-      }
-    }
-    return null;
-  };
-  return tryBraces() ?? tryBrackets();
-}
-
-function parseJsonLoose(text) {
-  // First, try direct parse
-  try {
-    return JSON.parse(text);
-  } catch {}
-  // Next, try to extract a balanced JSON object/array from the text
-  const snippet = extractBalancedJson(text);
-  if (snippet) {
-    try {
-      return JSON.parse(snippet);
-    } catch {}
-  }
-  // Give up with a helpful error
-  const preview = (text || '').slice(0, 240);
-  throw new Error(`Failed to parse JSON from model output. Preview: ${preview}`);
-}
-
-function assertTopLevelTypeMatches(value, schema) {
-  if (!schema || !schema.type) return; // best-effort only
-  const expected = schema.type;
-  const actual = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value);
-  if (expected === 'object' && typeof value !== 'object') {
-    throw new Error(`Expected JSON object but got ${actual}`);
-  }
-  if (expected === 'array' && !Array.isArray(value)) {
-    throw new Error(`Expected JSON array but got ${actual}`);
-  }
-}
-
-function normalizeSchema(schema) {
-  if (!schema || typeof schema !== 'object') return schema;
-
-  if (schema.type === 'object') {
-    const inputProps = schema.properties || {};
-    const properties = {};
-    for (const [k, v] of Object.entries(inputProps)) {
-      properties[k] = normalizeSchema(v);
-    }
-    const required = Object.keys(properties);
-    return {
-      type: 'object',
-      properties,
-      required,
-      additionalProperties: false,
-    };
-  }
-
-  if (schema.type === 'array') {
-    return {
-      type: 'array',
-      items: normalizeSchema(schema.items),
-    };
-  }
-
-  return schema; // primitives as-is
-}
-
-/**
- * Simple chat helper (backwards compatible)
- */
-export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
-  const traceId = randomUUID();
-  const start = Date.now();
-  log({ event: 'chat_start', traceId, model, temperature });
-  try {
-    const { choices } = await openaiClient.chat.completions.create({
-      model,
-      temperature,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    });
-    log({ event: 'chat_response', traceId, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
-    const content = choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      throw new Error('Empty response from model');
-    }
-    log({ event: 'chat_success', traceId, duration_ms: Date.now() - start, content_len: typeof content === 'string' ? content.length : 0 });
-    return content.trim();
-  } catch (err) {
-    log({ event: 'chat_error', traceId, name: err?.name, message: err?.message });
-    throw enhanceError(err, { stage: 'chat', model });
-  }
-}
-
-/**
- * Structured JSON chat helper.
- * Uses response_format to request strict JSON and adds lightweight validation & retries.
- *
- * @param {Object} args
- * @param {string} args.system
- * @param {string} args.user
- * @param {Object} [args.schema] - JSON Schema (draft-like) with at least a top-level `type` of 'object' or 'array'.
- * @param {number} [args.temperature=0]
- * @param {string} [args.model='gpt-4o-mini']
- * @param {number} [args.maxRetries=2]
- * @returns {Promise<any>} parsed JSON
- */
-export async function chatJson({
-  system,
-  user,
-  schema,
-  temperature = 0,
-  model = 'gpt-4o-mini',
-  maxRetries = 2,
-}) {
-  const traceId = randomUUID();
-  const overallStart = Date.now();
-  log({ event: 'chatJson_start', traceId, model, temperature, hasSchema: Boolean(schema) });
-  // Prefer strict JSON mode if supported, fall back gracefully.
-  const normalized = schema ? normalizeSchema(schema) : undefined;
-  const isArraySchema = !!normalized && normalized.type === 'array';
-  const effectiveSchema = normalized
-    ? (isArraySchema
-        ? { type: 'object', additionalProperties: false, properties: { data: normalized }, required: ['data'] }
-        : normalized)
-    : undefined;
-
-  const response_format = effectiveSchema
-    ? { type: 'json_schema', json_schema: { name: 'Output', schema: effectiveSchema, strict: true } }
-    : { type: 'json_object' };
-
-  log({ event: 'chatJson_prepared', traceId, response_format: response_format?.type, isArraySchema });
-
-  let lastErr;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const attemptStart = Date.now();
-    log({ event: 'chatJson_attempt', traceId, attempt: attempt + 1 });
-    try {
-      const { choices } = await openaiClient.chat.completions.create({
-        model,
-        temperature,
-        response_format,
-        messages: [
-          { role: 'system', content: effectiveSchema
-              ? `${system}\n\nYou must return ONLY valid minified JSON satisfying the provided schema.${isArraySchema ? ' The top-level object MUST have a single key "data" containing the array.' : ''}`
-              : `${system}\n\nYou must return ONLY valid minified JSON.` },
-          { role: 'user', content: user },
-        ],
-      });
-      log({ event: 'chatJson_response', traceId, attempt: attempt + 1, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
-      const raw = choices?.[0]?.message?.content ?? '';
-      log({ event: 'chatJson_raw', traceId, attempt: attempt + 1, raw_len: typeof raw === 'string' ? raw.length : 0 });
-      const parsed = parseJsonLoose(raw);
-      log({ event: 'chatJson_parsed', traceId, attempt: attempt + 1 });
-
-      if (isArraySchema) {
-        if (!parsed || typeof parsed !== 'object' || !('data' in parsed)) {
-          throw new Error('Model did not return an object with a "data" array');
-        }
-        assertTopLevelTypeMatches(parsed.data, schema);
-        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
-        return parsed.data;
-      } else {
-        assertTopLevelTypeMatches(parsed, schema);
-        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
-        return parsed;
-      }
-    } catch (err) {
-      log({ event: 'chatJson_error', traceId, attempt: attempt + 1, name: err?.name, message: err?.message });
-      lastErr = err;
-      if (attempt < maxRetries) {
-        // On retry, make the instruction even more explicit
-        system = `${system}\n\nReturn ONLY minified JSON with no commentary, markdown, or code fences.`;
-        log({ event: 'chatJson_retry', traceId, next_attempt: attempt + 2 });
-        continue;
-      }
-      log({ event: 'chatJson_fail', traceId, total_duration_ms: Date.now() - overallStart });
-      throw enhanceError(lastErr, { stage: 'chatJson', model, attempt });
-    }
-  }
-}
-
-/**
- * PiAPI image generation helper (streaming).
- * Consumes SSE stream and extracts image_url(s).
- */
-// Updated to accept both prompt and imageUrl, building correct PiAPI payload
 export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: "generateImage_start", traceId, model });
 
-  const resp = await fetch("https://api.piapi.ai/v1/chat/completions", {
+  // Prefer env-configured endpoint; fall back to the direct PiAPI endpoint used by the worker logs
+  const endpoint =
+    process.env.PAINT_ENDPOINT ||
+    env.paintEndpoint ||
+    "https://api-direct.piapi.ai/v1/chat/completions";
+
+  const resp = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Accept": "text/event-stream",
       Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
     },
     body: JSON.stringify({
       model,
       messages: [
-        {
-          role: "user",
-          content: [
-            ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
-            { type: "text", text: prompt }
-          ],
-        },
+        ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+        { type: "text", text: prompt }
       ],
       stream: true,
     }),
   });
 
+  if (!resp.ok || !resp.body) {
+    const preview = await (async () => {
+      try { return await resp.text(); } catch { return ""; }
+    })();
+    log({ event: "generateImage_http_error", traceId, status: resp.status, preview: preview?.slice(0, 400) });
+    throw new Error(`PiAPI request failed with status ${resp.status}`);
+  }
+
   let imageUrls = [];
   const decoder = new TextDecoder();
+
+  function collectFromContentParts(parts, source) {
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      // Standard image_url part
+      if (part?.type === "image_url" && part.image_url?.url) {
+        imageUrls.push(String(part.image_url.url));
+        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
+      }
+      // PiAPI/OpenAI output_image (URL-backed)
+      if (part?.type === "output_image" && part.source?.type === "url" && part.source?.url) {
+        imageUrls.push(String(part.source.url));
+        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.source.url });
+      }
+      // Generic image part with url
+      if (part?.type === "image" && part.image_url?.url) {
+        imageUrls.push(String(part.image_url.url));
+        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
+      }
+      // Base64 fallback (convert to data URL)
+      if (part?.type === "output_image" && part.b64_json) {
+        const dataUrl = `data:image/png;base64,${part.b64_json}`;
+        imageUrls.push(dataUrl);
+        log({ event: "generateImage_found_b64", traceId, source, length: part.b64_json.length });
+      }
+    }
+  }
+
+  // Robust SSE parsing: buffer until full events separated by \n\n
+  let buffer = "";
   try {
     for await (const chunk of resp.body) {
-      const lines = decoder.decode(chunk).split("\n");
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        const trimmed = line.replace("data:", "").trim();
-        if (trimmed === "[DONE]") continue;
+      buffer += decoder.decode(chunk, { stream: true });
+      let sepIndex;
+      while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+        const eventBlock = buffer.slice(0, sepIndex);
+        buffer = buffer.slice(sepIndex + 2);
+
+        // Concatenate multi-line "data:" payloads
+        const dataLines = eventBlock
+          .split("\n")
+          .filter(l => l.startsWith("data:"))
+          .map(l => l.slice(5).trim());
+
+        if (dataLines.length === 0) continue;
+        const dataStr = dataLines.join("\n");
+        if (dataStr === "[DONE]") continue;
+
         try {
-          const data = JSON.parse(trimmed);
-// Only process explicit image_url parts; avoid regex fallback to reduce noise
-          const content = data.choices?.[0]?.delta?.content;
-          if (Array.isArray(content)) {
-            for (const part of content) {
-              if (part.type === "image_url" && part.image_url?.url) {
-                imageUrls.push(part.image_url.url);
-                log({ event: "generateImage_found_url", traceId, imageUrl: part.image_url.url });
+          log({ event: "generateImage_raw_chunk", traceId, preview: dataStr.slice(0, 300) });
+          const data = JSON.parse(dataStr);
+
+          // Streaming deltas
+          collectFromContentParts(data?.choices?.[0]?.delta?.content, "delta");
+          // Final message (non-streaming end frame)
+          collectFromContentParts(data?.choices?.[0]?.message?.content, "message");
+
+          // Regex fallback
+          const str = JSON.stringify(data);
+          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+          if (urlMatches) {
+            for (const u of urlMatches) {
+              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
+                imageUrls.push(u);
+                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
               }
             }
           }
         } catch (e) {
-          log({ event: "generateImage_chunk_parse_failed", traceId, line: trimmed.slice(0, 200) });
+          log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
         }
       }
     }
@@ -316,5 +123,3 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
   }
   return imageUrls;
 }
-
-export { openaiClient, piapiClient };

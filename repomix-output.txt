@@ -1,0 +1,5309 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+
+Additional Info:
+----------------
+
+================================================================
+Directory Structure
+================================================================
+.claude/
+  settings.local.json
+app/
+  config/
+    env.js
+  db/
+    migrations/
+      20250816_drop_artwork_photoid_unique.sql
+    client.js
+    schema.sql
+    stylePrompts.js
+    systemPrompts.js
+  queue/
+    queues.js
+    workers.js
+  scripts/
+    migrate.js
+  server/
+    helpers/
+      validation.js
+    middleware/
+      rateLimit.js
+      requireApiKey.js
+    routes/
+      admin/
+        stylePrompts.js
+        stylePromptsUI.js
+        systemPrompts.js
+      adminRecent.js
+      catchments.js
+      events.js
+      health.js
+      moderationArtwork.js
+      moderationArtworkUI.js
+      moderationPhotos.js
+      moderationUI.js
+    app.js
+  services/
+    artworkTracker.js
+    cloudinary.js
+    framemock.js
+    google.js
+    n8n.js
+    openai.js
+    openverse.js
+    shopify.js
+  workflows/
+    artwork.js
+    catchment.js
+    locations.js
+    photos.js
+    publish.js
+  index.js
+.gitignore
+.render.yaml
+package.json
+README.md
+ReadMe.txt
+replacements.txt
+TODO.md
+
+================================================================
+Files
+================================================================
+
+================
+File: .claude/settings.local.json
+================
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install:*)"
+    ],
+    "deny": []
+  }
+}
+
+================
+File: app/config/env.js
+================
+import 'dotenv/config';
+
+function required(key) {
+  const v = process.env[key];
+  if (v == null || v === '') throw new Error(`Missing required env ${key}`);
+  return v;
+}
+function optional(key, def = undefined) {
+  const v = process.env[key];
+  return v == null || v === '' ? def : v;
+}
+function num(key, def) {
+  const v = optional(key);
+  const n = v == null ? NaN : Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+function bool(key, def = false) {
+  const v = optional(key);
+  if (v == null) return def;
+  return v === 'true' || v === '1';
+}
+
+export const env = {
+  // Core infra (required for the app to boot)
+  databaseUrl: required('DATABASE_URL'),
+  redisUrl: required('REDIS_URL'),
+
+  // Server
+  port: num('PORT', 3000),
+  ingestKey: optional('INGEST_KEY'),
+
+  // OpenAI (optional until a workflow needs it)
+  openaiKey: optional('OPENAI_API_KEY'),
+
+  // Google CSE (image search)
+  googleKey: optional('GOOGLE_API_KEY'),
+  googleCseId: optional('GOOGLE_CSE_ID'),
+
+  // Openverse (image search)
+  openverseApiKey: optional('OPENVERSE_API_KEY'),
+
+  // Cloudinary
+  cloudName: optional('CLOUDINARY_CLOUD_NAME'),
+  cloudKey: optional('CLOUDINARY_API_KEY'),
+  cloudSecret: optional('CLOUDINARY_API_SECRET'),
+
+  // Frame-mock service
+  frameMockUrl: optional('FRAME_MOCK_URL'),
+  frameMockApiKey: optional('FRAME_MOCK_API_KEY'),
+  frameUrl1: optional('frameUrl1'),
+  frameUrl2: optional('frameUrl2'),
+  frameUrl3: optional('frameUrl3'),
+
+  // Paint service
+  paintEndpoint: optional('PAINT_ENDPOINT'),
+
+  // Shopify
+  shop: optional('SHOPIFY_SHOP'),
+  shopToken: optional('SHOPIFY_ACCESS_TOKEN'),
+  shopifyVersion: optional('SHOPIFY_API_VERSION', '2024-04'),
+
+  // Queues & workers (mirrors defaults in queues/workers)
+  queuePrefix: optional('QUEUE_PREFIX', 'art-factory'),
+  queue: {
+    attempts: num('QUEUE_ATTEMPTS', 5),
+    backoffMs: num('QUEUE_BACKOFF_MS', 1000),
+    removeOnComplete: bool('QUEUE_REMOVE_ON_COMPLETE', true),
+    removeOnFail: bool('QUEUE_REMOVE_ON_FAIL', false),
+  },
+  concurrency: {
+    catchment: num('CONCURRENCY_CATCHMENT', 3),
+    location: num('CONCURRENCY_LOCATION', 3),
+    photo: num('CONCURRENCY_PHOTO', 4),
+    artwork: num('CONCURRENCY_ARTWORK', 2),
+    publish: num('CONCURRENCY_PUBLISH', 2),
+  },
+};
+
+================
+File: app/db/migrations/20250816_drop_artwork_photoid_unique.sql
+================
+ALTER TABLE artwork DROP CONSTRAINT artwork_unique_per_photo;
+
+================
+File: app/db/client.js
+================
+import knexFn from 'knex';
+import { env } from '../config/env.js';
+
+const db = knexFn({
+  client: 'pg',
+  connection: env.databaseUrl,
+  migrations: { tableName: 'knex_migrations' }
+});
+
+export default db;
+
+================
+File: app/db/schema.sql
+================
+create extension if not exists pgcrypto;
+
+-- ===================== 1. Catchments =====================
+create table if not exists catchments (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  lat        numeric not null,
+  lon        numeric not null,
+  intro      text,
+  shopify_id text,
+  processed  boolean not null default false,
+  created_at timestamptz default now()
+);
+
+-- System prompts table
+CREATE TABLE IF NOT EXISTS system_prompts (
+  id SERIAL PRIMARY KEY,
+  key TEXT UNIQUE NOT NULL,
+  text TEXT NOT NULL,
+  enabled BOOLEAN DEFAULT TRUE,
+  updated_at TIMESTAMP DEFAULT now()
+);
+
+-- Seed default system prompts
+INSERT INTO system_prompts (key, text) VALUES
+  ('location_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.'),
+  ('artwork_description_system', 'Describe a painting in 35 words.'),
+  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.')
+ON CONFLICT(key) DO NOTHING;
+
+-- Guardrails for geo ranges (no-op if already present)
+alter table catchments drop constraint if exists catchments_lat_range;
+alter table catchments add constraint catchments_lat_range check (lat >= -90 and lat <= 90);
+alter table catchments drop constraint if exists catchments_lon_range;
+alter table catchments add constraint catchments_lon_range check (lon >= -180 and lon <= 180);
+
+-- Prevent duplicate catchments (same name+lat+lon, case-insensitive on name)
+create unique index if not exists catchments_unique_name_geo
+  on catchments(lower(name), lat, lon);
+
+-- Avoid duplicate Shopify collections when backfilling
+create unique index if not exists catchments_shopify_unique
+  on catchments(shopify_id)
+  where shopify_id is not null;
+
+create index if not exists idx_catchments_created_at on catchments(created_at);
+
+-- ===================== 2. Locations ======================
+create table if not exists locations (
+  id           uuid primary key default gen_random_uuid(),
+  catchment_id uuid not null references catchments(id) on delete cascade,
+  name         text not null,
+  address      text,
+  category     text,
+  description  text,
+  search_term  text,
+  -- Google Places enrichment fields
+  g_place_id text,
+  g_name text,
+  g_formatted_address text,
+  g_phone text,
+  g_website text,
+  g_lat numeric,
+  g_lng numeric,
+  g_rating numeric,
+  g_user_ratings_total integer,
+  g_types text,
+  g_photo_refs jsonb default '[]'::jsonb,
+  processed    boolean not null default false,
+  created_at   timestamptz default now()
+);
+
+-- Helpful index for joins
+create index if not exists idx_locations_catchment on locations(catchment_id);
+
+-- Prevent duplicate places inside the same catchment (case-insensitive on name)
+create unique index if not exists locations_unique_place_per_catchment
+  on locations(catchment_id, lower(name));
+
+-- Fast retrieval by creation time
+create index if not exists idx_locations_created_at on locations(created_at);
+
+-- ===================== 3. Photos =========================
+create table if not exists photos (
+  id             uuid primary key default gen_random_uuid(),
+  location_id    uuid not null references locations(id) on delete cascade,
+  src_url        text not null,
+  kept           boolean not null default false,
+  score          numeric,
+  cloudinary_id  text,
+  secure_url     text,
+  processed      boolean not null default false,
+  -- Openverse metadata columns
+  ov_id              text,
+  ov_title           text,
+  ov_creator         text,
+  ov_creator_url     text,
+  ov_license         text,
+  ov_license_version text,
+  ov_license_url     text,
+  ov_source          text,
+  ov_category        text,
+  ov_provider        text,
+  ov_thumbnail       text,
+  ov_detail_url      text,
+  ov_width           integer,
+  ov_height          integer,
+  created_at     timestamptz default now()
+);
+
+-- Idempotent constraints & indexes for photos
+alter table photos drop constraint if exists photos_score_range;
+alter table photos add constraint photos_score_range check (score is null or (score >= 0 and score <= 1));
+create index if not exists idx_photos_location on photos(location_id);
+create unique index if not exists photos_location_src_url on photos(location_id, src_url);
+
+-- Ensure a Cloudinary asset is not linked twice (when present)
+create unique index if not exists photos_cloudinary_unique
+  on photos(cloudinary_id)
+  where cloudinary_id is not null;
+
+create index if not exists idx_photos_created_at on photos(created_at);
+
+-- ===================== 4. Artwork ========================
+create table if not exists artwork (
+  id          uuid primary key default gen_random_uuid(),
+  photo_id    uuid not null references photos(id) on delete cascade,
+  image_url   text not null,
+  description text,
+  mockup_urls jsonb default '[]'::jsonb,
+  shopify_id  text,
+  published   boolean not null default false,
+  created_at  timestamptz default now()
+);
+
+create index if not exists idx_artwork_photo on artwork(photo_id);
+
+-- One artwork per source photo
+create unique index if not exists artwork_unique_per_photo on artwork(photo_id);
+
+-- Avoid duplicate Shopify products when backfilling
+create unique index if not exists artwork_shopify_unique
+  on artwork(shopify_id)
+  where shopify_id is not null;
+
+create index if not exists idx_artwork_created_at on artwork(created_at);
+
+-- ===================== Orchestration =====================
+-- We are using code-driven queue chaining (Option A). Remove LISTEN/NOTIFY triggers.
+-- Drop old triggers/functions if they exist so schemas remain clean.
+
+drop trigger if exists trg_notify_catchments on catchments;
+drop trigger if exists trg_notify_locations  on locations;
+drop trigger if exists trg_notify_photos     on photos;
+drop trigger if exists trg_notify_artwork    on artwork;
+
+drop function if exists notify_event() cascade;
+
+-- ===================== 5. Style Prompts ===================
+create table if not exists style_prompts (
+  id serial primary key,
+  text text not null,
+  enabled boolean not null default true,
+  updated_at timestamptz default now(),
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_style_prompts_enabled on style_prompts(enabled);
+
+-- ===================== Quality-of-life ===================
+create index if not exists idx_catchments_processed on catchments(processed);
+create index if not exists idx_locations_processed on locations(processed);
+create index if not exists idx_photos_processed    on photos(processed);
+create index if not exists idx_artwork_published   on artwork(published);
+
+================
+File: app/db/stylePrompts.js
+================
+import db from './client.js';
+
+export async function getEnabled() {
+  return db('style_prompts').where({ enabled: true }).orderBy('id', 'asc');
+}
+
+export async function getAll() {
+  return db('style_prompts').orderBy('id', 'asc');
+}
+
+export async function createPrompt(text, enabled = true) {
+  const [prompt] = await db('style_prompts')
+    .insert({ text, enabled })
+    .returning('*');
+  return prompt;
+}
+
+export async function updatePrompt(id, text) {
+  const [prompt] = await db('style_prompts')
+    .where({ id })
+    .update({ text, updated_at: db.fn.now() })
+    .returning('*');
+  return prompt;
+}
+
+export async function deletePrompt(id) {
+  return db('style_prompts').where({ id }).del();
+}
+
+export async function togglePrompt(id, enabled) {
+  const [prompt] = await db('style_prompts')
+    .where({ id })
+    .update({ enabled, updated_at: db.fn.now() })
+    .returning('*');
+  return prompt;
+}
+
+================
+File: app/db/systemPrompts.js
+================
+import db from './client.js';
+
+export async function getAll() {
+  return db('system_prompts').orderBy('id', 'asc');
+}
+
+export async function getByKey(key) {
+  return db('system_prompts').where({ key }).first();
+}
+
+export async function updatePrompt(key, text, enabled = true) {
+  const [prompt] = await db('system_prompts')
+    .insert({ key, text, enabled })
+    .onConflict('key')
+    .merge({ text, enabled, updated_at: db.fn.now() })
+    .returning('*');
+  return prompt;
+}
+
+================
+File: app/queue/queues.js
+================
+import { Queue } from 'bullmq';
+import IORedis from 'ioredis';
+import { env } from '../config/env.js';
+
+// Shared Redis connection
+const connection = new IORedis(env.redisUrl);
+
+// Sensible defaults with env overrides
+const ATTEMPTS = Number.parseInt(process.env.QUEUE_ATTEMPTS || '5', 10);
+const BACKOFF_MS = Number.parseInt(process.env.QUEUE_BACKOFF_MS || '1000', 10);
+const REMOVE_ON_COMPLETE = process.env.QUEUE_REMOVE_ON_COMPLETE
+  ? process.env.QUEUE_REMOVE_ON_COMPLETE === 'true'
+  : true;
+const REMOVE_ON_FAIL = process.env.QUEUE_REMOVE_ON_FAIL
+  ? process.env.QUEUE_REMOVE_ON_FAIL === 'true'
+  : false;
+const PREFIX = process.env.QUEUE_PREFIX || 'art-factory';
+
+const defaultJobOptions = {
+  attempts: ATTEMPTS,
+  backoff: { type: 'exponential', delay: BACKOFF_MS },
+  removeOnComplete: REMOVE_ON_COMPLETE,
+  removeOnFail: REMOVE_ON_FAIL,
+};
+
+function createQueue(name) {
+  return new Queue(name, {
+    connection,
+    defaultJobOptions,
+    prefix: PREFIX,
+  });
+}
+
+export const qCatchment = createQueue('catchment');
+export const qLocation  = createQueue('location');
+export const qPhoto     = createQueue('photo');
+export const qArtwork   = createQueue('artwork');
+export const qPublish   = createQueue('publish');
+
+// Optionally export the shared connection for workers
+export { connection };
+
+================
+File: app/queue/workers.js
+================
+import { Worker } from 'bullmq';
+import { randomUUID } from 'crypto';
+import { connection } from './queues.js';
+import catchment from '../workflows/catchment.js';
+import locations from '../workflows/locations.js';
+import photos from '../workflows/photos.js';
+import artwork from '../workflows/artwork.js';
+import publish from '../workflows/publish.js';
+
+// Use same prefix as queues to ensure workers consume the correct streams
+const PREFIX = process.env.QUEUE_PREFIX || 'art-factory';
+
+// Per-queue concurrency (override via env)
+const CONCURRENCY = {
+  catchment: parseInt(process.env.CONCURRENCY_CATCHMENT || '3', 10),
+  location:  parseInt(process.env.CONCURRENCY_LOCATION  || '3', 10),
+  photo:     parseInt(process.env.CONCURRENCY_PHOTO     || '4', 10),
+  artwork:   parseInt(process.env.CONCURRENCY_ARTWORK   || '2', 10),
+  publish:   parseInt(process.env.CONCURRENCY_PUBLISH   || '2', 10),
+};
+
+function makeWorker(name, processor, concurrency) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: name,
+        ...data,
+      }));
+    } catch (_) {
+      // best-effort
+    }
+  };
+  const worker = new Worker(name, processor, { connection, concurrency, prefix: PREFIX });
+  worker.on('active', (job) => {
+    log({ event: 'job_started', jobId: job.id, jobName: job.name, data: job.data, attempt: job.attemptsMade });
+  });
+  worker.on('completed', (job, result) => {
+    log({ event: 'job_completed', jobId: job.id, jobName: job.name, duration_ms: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : undefined, resultSummary: result && typeof result === 'object' ? { ...result, ...(result?.length ? { length: result.length } : {}) } : undefined });
+  });
+  worker.on('failed', (job, err) => {
+    log({ event: 'job_failed', jobId: job?.id, jobName: job?.name, data: job?.data, attempt: job?.attemptsMade, name: err?.name, message: err?.message, stack: err?.stack });
+  });
+  worker.on('error', (err) => {
+    log({ event: 'worker_error', name: err?.name, message: err?.message, stack: err?.stack });
+  });
+  worker.on('stalled', (jobId) => {
+    log({ event: 'job_stalled', jobId });
+  });
+  return worker;
+}
+
+makeWorker('catchment', catchment, CONCURRENCY.catchment);
+makeWorker('location',  locations, CONCURRENCY.location);
+makeWorker('photo',     photos,    CONCURRENCY.photo);
+makeWorker('artwork',   artwork,   CONCURRENCY.artwork);
+makeWorker('publish',   publish,   CONCURRENCY.publish);
+
+================
+File: app/scripts/migrate.js
+================
+// scripts/migrate.js
+import fs from 'node:fs/promises';
+import pg from 'pg';
+
+import { env } from '../config/env.js';
+
+const sql = await fs.readFile(new URL('../db/schema.sql', import.meta.url), 'utf8');
+const client = new pg.Client({ connectionString: env.databaseUrl });
+await client.connect();
+try {
+  await client.query(sql);
+  console.log('Schema applied ✅');
+} finally {
+  await client.end();
+}
+
+================
+File: app/server/helpers/validation.js
+================
+function toNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+export function validateCatchmentBody(body) {
+  const errors = [];
+  const name = (body?.name ?? '').toString().trim();
+  const lat = toNumber(body?.lat);
+  const lon = toNumber(body?.lon);
+  const intro = body?.intro ? body.intro.toString().trim() : null;
+
+  if (!name) errors.push('name is required');
+  if (!Number.isFinite(lat)) errors.push('lat must be a number');
+  if (!Number.isFinite(lon)) errors.push('lon must be a number');
+  if (Number.isFinite(lat) && (lat < -90 || lat > 90)) errors.push('lat out of range');
+  if (Number.isFinite(lon) && (lon < -180 || lon > 180)) errors.push('lon out of range');
+
+  return { valid: errors.length === 0, errors, name, lat, lon, intro };
+}
+
+================
+File: app/server/middleware/rateLimit.js
+================
+// Minimal, dependency-free rate limiter
+const RATE_WINDOW_MS = 60_000; // 1 minute
+const RATE_MAX = 60; // requests per window per IP
+const rateMap = new Map(); // ip -> { count, reset }
+
+export function rateLimit(req, res, next) {
+  const now = Date.now();
+  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  let entry = rateMap.get(ip);
+  if (!entry || now > entry.reset) {
+    entry = { count: 0, reset: now + RATE_WINDOW_MS };
+    rateMap.set(ip, entry);
+  }
+  entry.count += 1;
+  const remaining = Math.max(RATE_MAX - entry.count, 0);
+  res.setHeader('X-RateLimit-Remaining', String(remaining));
+  res.setHeader('X-RateLimit-Reset', String(Math.floor(entry.reset / 1000)));
+  if (entry.count > RATE_MAX) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'rate_limited', ip, count: entry.count, window_ms: RATE_WINDOW_MS });
+    }
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+  next();
+}
+
+================
+File: app/server/middleware/requireApiKey.js
+================
+import { env } from '../../config/env.js';
+
+// Optional API key auth for write endpoints
+export function requireApiKey(req, res, next) {
+  const expected = env.ingestKey; // set to enable
+  if (!expected) return next();
+  const provided = req.headers['x-api-key'] || req.headers['x-ingest-key'];
+  if (provided !== expected) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'auth_failed' });
+    }
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+================
+File: app/server/routes/admin/stylePrompts.js
+================
+import express from 'express';
+import * as stylePrompts from '../../../db/stylePrompts.js';
+
+const router = express.Router({ mergeParams: true });
+
+// Get all prompts
+router.get('/', async (req, res) => {
+  try {
+    const prompts = await stylePrompts.getAll();
+    res.json(prompts);
+  } catch (err) {
+    console.error('Failed to get style prompts', err);
+    res.status(500).json({ error: 'Failed to get style prompts' });
+  }
+});
+
+// Create a prompt
+router.post('/', async (req, res) => {
+  try {
+    const { text, enabled } = req.body;
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Prompt text is required' });
+    }
+    const prompt = await stylePrompts.createPrompt(text, enabled);
+    res.status(201).json(prompt);
+  } catch (err) {
+    console.error('Failed to create style prompt', err);
+    res.status(500).json({ error: 'Failed to create style prompt' });
+  }
+});
+
+// Update prompt text
+router.patch('/:id', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Prompt text is required' });
+    }
+    const prompt = await stylePrompts.updatePrompt(req.params.id, text);
+    res.json(prompt);
+  } catch (err) {
+    console.error('Failed to update style prompt', err);
+    res.status(500).json({ error: 'Failed to update style prompt' });
+  }
+});
+
+// Toggle prompt enabled status
+router.patch('/:id/toggle', async (req, res) => {
+  try {
+    let { enabled } = req.body;
+
+    // Coerce string "true"/"false" to boolean
+    if (typeof enabled === 'string') {
+      if (enabled.toLowerCase() === 'true') enabled = true;
+      else if (enabled.toLowerCase() === 'false') enabled = false;
+    }
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'Enabled must be a boolean' });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
+    }
+
+    const prompt = await stylePrompts.togglePrompt(id, enabled);
+    if (!prompt) {
+      return res.status(404).json({ error: 'Prompt not found' });
+    }
+
+    // If returning array or null, ensure JSON serializable object
+    res.json({ id: prompt.id, text: prompt.text, enabled: prompt.enabled, updated_at: prompt.updated_at });
+  } catch (err) {
+    console.error('Failed to toggle style prompt', err);
+    res.status(500).json({ error: 'Failed to toggle style prompt', details: err?.message });
+  }
+});
+
+// Delete a prompt
+router.delete('/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
+    }
+    const deletedCount = await stylePrompts.deletePrompt(id);
+    if (deletedCount === 0) {
+      return res.status(404).json({ error: 'Prompt not found' });
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('Failed to delete style prompt', err);
+    res.status(500).json({ error: 'Failed to delete style prompt', details: err?.message });
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/admin/stylePromptsUI.js
+================
+import express from 'express';
+import { requireApiKey } from '../../middleware/requireApiKey.js';
+import { getAll as getStylePrompts, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
+import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
+
+const router = express.Router();
+
+// Admin UI page - system prompts + style prompts
+router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
+  try {
+    const [stylePrompts, systemPrompts] = await Promise.all([
+      getStylePrompts(),
+      getSystemPrompts()
+    ]);
+
+    res.send(`
+      <html>
+        <head>
+          <title>Prompts Configuration</title>
+        </head>
+        <body>
+          <h1>System Prompts</h1>
+          <form method="POST" action="/admin/system-prompts-ui/update">
+            ${systemPrompts.map(p => `
+              <div>
+                <label for="${p.key}">${p.key}</label><br/>
+                <textarea name="${p.key}" rows="3" cols="80">${p.text}</textarea><br/>
+              </div>
+            `).join('')}
+            <button type="submit">Save System Prompts</button>
+          </form>
+
+          <h1>Style Prompts</h1>
+          <form method="POST" action="/admin/style-prompts-ui/update">
+            ${stylePrompts.map(p => `
+              <div>
+                <label for="style-${p.id}">Prompt #${p.id}</label><br/>
+                <textarea name="text_${p.id}" rows="2" cols="80">${p.text}</textarea><br/>
+                <label>
+                  <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
+                </label>
+              </div>
+            `).join('')}
+            <button type="submit">Save Style Prompts</button>
+          </form>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Handle updates for system prompts
+router.post('/admin/system-prompts-ui/update', requireApiKey, async (req, res, next) => {
+  try {
+    const updates = Object.entries(req.body);
+    for (const [key, text] of updates) {
+      if (text) {
+        await updateSystemPrompt(key, text, true);
+      }
+    }
+    res.redirect('/admin/style-prompts-ui');
+  } catch (err) {
+    next(err);
+  }
+});
+
+  
+// Handle updates for style prompts
+router.post('/admin/style-prompts-ui/update', requireApiKey, async (req, res, next) => {
+  try {
+    for (const key of Object.keys(req.body)) {
+      if (key.startsWith('text_')) {
+        const id = key.split('_')[1];
+        const text = req.body[`text_${id}`];
+        const enabled = req.body[`enabled_${id}`] !== undefined;
+        if (text) {
+          await updateStylePrompt(id, text);
+        }
+        await toggleStylePrompt(id, enabled);
+      }
+    }
+    res.redirect('/admin/style-prompts-ui');
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/admin/systemPrompts.js
+================
+import express from 'express';
+import { requireApiKey } from '../../middleware/requireApiKey.js';
+import { getAll, updatePrompt } from '../../../db/systemPrompts.js';
+
+const router = express.Router();
+
+// List all system prompts
+router.get('/admin/system-prompts', requireApiKey, async (req, res, next) => {
+  try {
+    const prompts = await getAll();
+    res.json({ prompts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update a prompt by key
+router.put('/admin/system-prompts/:key', requireApiKey, async (req, res, next) => {
+  const { key } = req.params;
+  const { text, enabled = true } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: 'missing_text' });
+  }
+  try {
+    const prompt = await updatePrompt(key, text, enabled);
+    res.json({ prompt });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/adminRecent.js
+================
+import express from 'express';
+import db from '../../db/client.js';
+
+const router = express.Router();
+
+// Admin data for UI: last 20 catchments with rollup counts
+router.get('/admin/recent', async (_req, res, next) => {
+  try {
+    const t0 = Date.now();
+    const rows = await db
+      .select(
+        'c.id', 'c.name', 'c.created_at',
+        db.raw(`(
+          select count(*) from locations l
+          where l.catchment_id = c.id
+        ) as locations`),
+        db.raw(`(
+          select count(*) from photos p
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id
+        ) as photos_total`),
+        db.raw(`(
+          select count(*) from photos p
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and p.kept
+        ) as photos_kept`),
+        db.raw(`(
+          select count(*) from artwork a
+          join photos p on p.id = a.photo_id
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id
+        ) as artworks`),
+        db.raw(`(
+          select count(*) from artwork a
+          join photos p on p.id = a.photo_id
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and a.published
+        ) as published`)
+      )
+      .from({ c: 'catchments' })
+      .orderBy('c.created_at', 'desc')
+      .limit(20);
+
+    if (typeof _req.log === 'function') {
+      _req.log({ event: 'admin_recent', count: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({
+      rows,
+      redisPresent: Boolean(process.env.REDIS_URL),
+      dbOk: true
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/catchments.js
+================
+import express from 'express';
+import db from '../../db/client.js';
+import { qCatchment } from '../../queue/queues.js';
+import { requireApiKey } from '../middleware/requireApiKey.js';
+import { rateLimit } from '../middleware/rateLimit.js';
+import { validateCatchmentBody } from '../helpers/validation.js';
+
+const router = express.Router();
+
+// Ingest: create a catchment and kick off the pipeline
+router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
+  try {
+    const t0 = Date.now();
+    const { valid, errors, name, lat, lon, intro } = validateCatchmentBody(req.body);
+
+    // Optional: image source selection
+    const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
+    if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
+
+    const insert = await db('catchments')
+      .insert({ name, lat, lon, intro })
+      .returning(['id']);
+    const id = insert?.[0]?.id;
+    if (!id) throw new Error('Failed to create catchment');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_inserted', catchmentId: id });
+    }
+    // Enqueue stage 1 explicitly (idempotent jobId)
+    await qCatchment.add(
+      'catchment',
+      { catchmentId: id, imageSource },
+      { jobId: `catchment:${id}` }
+    );
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+    }
+    return res.status(202).json({ id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
+  const { stage, id } = req.params;
+  switch (stage) {
+    case 'catchment':
+      await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'requeue', stage: 'catchment', id, jobId: `catchment:${id}` });
+      }
+      break;
+    default:
+      return res.status(400).send('bad stage');
+  }
+  res.send('queued');
+});
+
+export default router;
+
+================
+File: app/server/routes/events.js
+================
+import express from 'express';
+import db from '../../db/client.js';
+
+const router = express.Router();
+
+// Server-Sent Events (SSE) for realtime operator updates
+router.get('/events', async (req, res, next) => {
+  try {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const send = (payload) => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } catch (_) {
+        // ignore
+      }
+    };
+
+    // Immediately push a snapshot
+    const snapshot = await db
+      .select(
+        'c.id', 'c.name', 'c.created_at',
+        db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+      )
+      .from({ c: 'catchments' })
+      .orderBy('c.created_at', 'desc')
+      .limit(20);
+    send({ type: 'recent', rows: snapshot });
+
+    // Stream periodic updates
+    const intervalMs = 2000;
+    const iv = setInterval(async () => {
+      try {
+        const rows = await db
+          .select(
+            'c.id', 'c.name', 'c.created_at',
+            db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+          )
+          .from({ c: 'catchments' })
+          .orderBy('c.created_at', 'desc')
+          .limit(20);
+        send({ type: 'recent', rows });
+      } catch (e) {
+        // best-effort
+      }
+    }, intervalMs);
+
+    req.on('close', () => {
+      clearInterval(iv);
+      try { res.end(); } catch {}
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/health.js
+================
+import express from 'express';
+
+const router = express.Router();
+
+// Health check endpoint
+router.get('/health', (_req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+export default router;
+
+================
+File: app/server/routes/moderationArtwork.js
+================
+import express from 'express';
+import db from '../../db/client.js';
+import { qPublish } from '../../queue/queues.js';
+import { requireApiKey } from '../middleware/requireApiKey.js';
+import { createMockups } from '../../services/framemock.js';
+
+const router = express.Router();
+
+// List artworks for moderation (pending by default)
+router.get('/admin/artworks', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId, status = 'pending' } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('artwork as a')
+      .join('photos as p', 'p.id', 'a.photo_id')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
+        'p.id as photo_id','l.name as location_name'
+      )
+      .where('l.catchment_id', catchmentId)
+      .modify(qb => {
+        if (status === 'pending') {
+          qb.where('a.published', false)
+            .andWhere(inner => {
+              inner.where('a.approved_for_publish', false).orWhereNull('a.approved_for_publish');
+            });
+        }
+        if (status === 'approved') qb.where('a.approved_for_publish', true);
+        if (status === 'rejected') qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
+      })
+      .orderBy('a.id','desc')
+      .limit(200);
+    if (typeof req.log === 'function') req.log({ event: 'admin_artworks', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    res.json({ artworks: rows });
+  } catch (err) { next(err); }
+});
+
+// Moderate generated artwork (approve => enqueue publish, reject => mark only)
+router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const { action } = req.body || {};
+  const t0 = Date.now();
+  try {
+    if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
+
+    if (action === 'reject') {
+      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    console.log('moderationArtwork: approve branch entered', { id, action });
+
+    await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
+
+    // Fetch artwork to get image_url
+    const art = await db('artwork').where({ id }).first();
+    if (!art || !art.image_url) {
+      console.error('No image_url for artwork, cannot generate mockups', { id });
+    } else {
+      // Check environment variables needed for framemock
+      const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+      if (!frameMockUrl) {
+        console.error('Missing env.frameMockUrl');
+      }
+      if (!frameMockApiKey) {
+        console.warn('Missing env.frameMockApiKey - requests may fail if auth is required');
+      }
+
+      try {
+        console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
+        const mockupUrls = await createMockups(art.image_url);
+        console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
+        await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_mockups', artworkId: id, mockupsCount: mockupUrls.length });
+        } else {
+          console.log('generate_mockups', { artworkId: id, mockupsCount: mockupUrls.length });
+        }
+      } catch (err) {
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_mockups_failed', artworkId: id, error: err.message });
+        }
+        console.error('generate_mockups_failed', { artworkId: id, error: err });
+      }
+    }
+
+    await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
+    if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'approve', enqueuedPublish: true, duration_ms: Date.now() - t0 });
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) { next(err); }
+});
+
+export default router;
+
+================
+File: app/server/routes/moderationArtworkUI.js
+================
+import express from 'express';
+
+const router = express.Router();
+
+// Moderation UI for artwork
+router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Artwork</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:220px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Artwork</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function j(u, opt){ const r = await fetch(u, opt); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
+  grid.innerHTML='';
+  for(const a of data.artworks){
+    const card=document.createElement('div'); card.className='card';
+    const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
+    card.innerHTML = \`
+      <img class="img" src="\${mock||a.image_url}" alt=""/>
+      <div class="meta">
+        <div class="row"><div>\${a.location_name||''}</div></div>
+        <div class="row">
+          <button data-act="approve" data-id="\${a.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${a.id}">Reject</button>
+        </div>
+      </div>\`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button'); if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/artwork/'+id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) { next(err); }
+});
+
+export default router;
+
+================
+File: app/server/routes/moderationPhotos.js
+================
+import express from 'express';
+import db from '../../db/client.js';
+import { uploadImage } from '../../services/cloudinary.js';
+import { qArtwork } from '../../queue/queues.js';
+import { requireApiKey } from '../middleware/requireApiKey.js';
+
+const router = express.Router();
+
+// JSON for moderation grid
+router.get('/admin/photos', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
+      .where('l.catchment_id', catchmentId)
+      .orderBy('p.created_at','desc');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({ photos: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Approve/Reject photo
+router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const action = (req.body?.action || '').toString();
+  const t0 = Date.now();
+  let uploadedToCloudinary = false;
+  let enqueuedArtwork = false;
+  try {
+    const photo = await db('photos').where({ id }).first();
+    if (!photo) return res.status(404).json({ error: 'not_found' });
+
+    if (action === 'reject') {
+      await db('photos').where({ id }).update({ kept: false, processed: true });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      }
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
+
+    // Approve: mark kept, ensure upload, then enqueue artwork
+    await db('photos').where({ id }).update({ kept: true });
+
+    if (!photo.cloudinary_id || !photo.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photo.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photo.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+      uploadedToCloudinary = true;
+    }
+
+    await db('photos').where({ id }).update({ processed: true });
+    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
+    enqueuedArtwork = true;
+    if (typeof req.log === 'function') {
+      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+    }
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/routes/moderationUI.js
+================
+import express from 'express';
+
+const router = express.Router();
+
+// Moderation UI for photos
+router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Photos</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Photos</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await json('/admin/photos?catchmentId=${catchmentId}');
+  grid.innerHTML = '';
+  for(const p of data.photos){
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = \`
+      <img class="img" src="\${p.src_url}" alt=""/>
+      <div class="meta">
+        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false} </div></div>
+        \${p.ov_id ? '<div class="row muted" style="font-size:12px;flex-direction:column;align-items:flex-start">'
+          + '<div><strong>Title:</strong> ' + (p.ov_title || '') + '</div>'
+          + '<div><strong>Creator:</strong> ' + (p.ov_creator || '') + '</div>'
+          + '<div><strong>License:</strong> ' + (p.ov_license || '') + ' ' + (p.ov_license_version || '') + '</div>'
+          + '<div><a href="' + (p.ov_license_url || '#') + '" target="_blank">License Link</a></div>'
+          + '<div><a href="' + (p.ov_detail_url || p.ov_source || '#') + '" target="_blank">Source</a></div>'
+          + '<div><strong>Dimensions:</strong> ' + (p.ov_width || '') + ' × ' + (p.ov_height || '') + '</div>'
+        + '</div>' : ''}
+        <div class="row">
+          <button data-act="approve" data-id="\${p.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
+        </div>
+      </div>\`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button');
+  if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
+File: app/server/app.js
+================
+import express from 'express';
+import { randomUUID } from 'crypto';
+import { env } from '../config/env.js';
+import { rateLimit } from './middleware/rateLimit.js';
+import { requireApiKey } from './middleware/requireApiKey.js';
+
+import operatorUI from './routes/operatorUI.js';
+import moderationUI from './routes/moderationUI.js';
+import moderationArtworkUI from './routes/moderationArtworkUI.js';
+import moderationPhotos from './routes/moderationPhotos.js';
+import moderationArtwork from './routes/moderationArtwork.js';
+import eventsRoute from './routes/events.js';
+import catchmentsRoute from './routes/catchments.js';
+import adminRecent from './routes/adminRecent.js';
+import healthRoute from './routes/health.js';
+import stylePromptsApi from './routes/admin/stylePrompts.js';
+import stylePromptsUI from './routes/admin/stylePromptsUI.js';
+
+// Initialize app
+export function createApp() {
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '1mb' }));
+
+  // ---------- Basic structured request logging ----------
+  app.use((req, res, next) => {
+    const start = Date.now();
+    const requestId = randomUUID();
+    req.requestId = requestId;
+    req.log = (data = {}) => {
+      try {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          requestId,
+          method: req.method,
+          path: req.path,
+          ...data,
+        }));
+      } catch (_) {
+        // best-effort logging
+      }
+    };
+    req.log({ event: 'request_start' });
+    res.on('finish', () => {
+      req.log({ event: 'request_end', status: res.statusCode, duration_ms: Date.now() - start });
+    });
+    next();
+  });
+
+  // Mount routes
+  app.use('/', operatorUI);
+  app.use('/', moderationUI);
+  app.use('/', moderationArtworkUI);
+  app.use('/', moderationPhotos);
+  app.use('/', moderationArtwork);
+  app.use('/', eventsRoute);
+  app.use('/', catchmentsRoute);
+  app.use('/', adminRecent);
+  app.use('/', healthRoute);
+  app.use('/admin/style-prompts', stylePromptsApi);
+  app.use('/', stylePromptsUI);
+
+  // ---------- Error handling ----------
+  // 404
+  app.use((_req, res) => {
+    res.status(404).json({ error: 'not_found' });
+  });
+
+  // 500
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, _next) => {
+    try {
+      const payload = {
+        ts: new Date().toISOString(),
+        event: 'unhandled_error',
+        requestId: req?.requestId,
+        name: err?.name,
+        message: err?.message,
+        stack: err?.stack,
+      };
+      console.error(JSON.stringify(payload));
+    } catch (_) {
+      // best-effort
+      console.error('Unhandled error', err);
+    }
+    res.status(500).json({ error: 'internal_error' });
+  });
+
+  return app;
+}
+
+================
+File: app/services/artworkTracker.js
+================
+/**
+ * Simple in-memory tracker for artwork processing state.
+ * In production, replace with a persistent store (DB, Redis, etc.)
+ */
+
+const state = {
+  inProgress: new Set(),
+  completed: new Set()
+};
+
+/**
+ * Check if the given photoId has already been processed or is currently being processed.
+ * @param {string} photoId
+ * @returns {Promise<boolean>}
+ */
+export async function isProcessed(photoId) {
+  return state.inProgress.has(photoId) || state.completed.has(photoId);
+}
+
+/**
+ * Mark the given photoId as in-progress.
+ * @param {string} photoId
+ */
+export async function markInProgress(photoId) {
+  state.inProgress.add(photoId);
+}
+
+/**
+ * Mark the given photoId as completed and remove from in-progress.
+ * @param {string} photoId
+ */
+export async function markCompleted(photoId) {
+  state.inProgress.delete(photoId);
+  state.completed.add(photoId);
+}
+
+/**
+ * Clear the in-progress state for the given photoId without marking it completed.
+ * Useful when a job fails and should be retried later.
+ * @param {string} photoId
+ */
+export async function clearInProgress(photoId) {
+  state.inProgress.delete(photoId);
+}
+
+export default {
+  isProcessed,
+  markInProgress,
+  markCompleted,
+  clearInProgress
+};
+
+================
+File: app/services/cloudinary.js
+================
+import { randomUUID } from 'crypto';
+import cloudinary from 'cloudinary';
+import { env } from '../config/env.js';
+
+cloudinary.v2.config({
+  cloud_name: env.cloudName,
+  api_key: env.cloudKey,
+  api_secret: env.cloudSecret,
+});
+
+const DEFAULT_TIMEOUT_MS = 20000;
+const DEFAULT_RETRIES = 2;
+const BASE_DELAY_MS = 250;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryable(err) {
+  const code = err?.http_code || err?.statusCode;
+  // Retry on 429 and 5xx or common network-ish errors
+  return (
+    code === 429 || (typeof code === 'number' && code >= 500) ||
+    /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(String(err?.message || ''))
+  );
+}
+
+/**
+ * Upload an image (remote URL, local path, or buffer/stream) to Cloudinary.
+ * Backward compatible return shape: { url, id } while also returning raw fields.
+ *
+ * @param {string|Buffer|Stream} image - Source to upload (URL, path, buffer, stream)
+ * @param {Object} [options]
+ * @param {string} [options.folder] - Cloudinary folder to store under
+ * @param {string[]} [options.tags]
+ * @param {string} [options.publicId] - Provide for idempotency/deterministic uploads
+ * @param {boolean} [options.overwrite=false]
+ * @param {boolean} [options.invalidate=false]
+ * @param {number} [options.timeoutMs=20000]
+ * @param {number} [options.retries=2]
+ */
+export async function getImageMetadata(publicId, {
+  exif = true,
+  context = true,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  retries = DEFAULT_RETRIES
+} = {}) {
+  if (!publicId) throw new Error('getImageMetadata: "publicId" is required');
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await cloudinary.v2.api.resource(publicId, {
+        resource_type: 'image',
+        exif,
+        context,
+        timeout: timeoutMs
+      });
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryable(err)) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('Unknown Cloudinary metadata retrieval error');
+}
+
+export async function uploadImage(
+  image,
+  {
+    folder,
+    tags,
+    publicId,
+    overwrite = false,
+    invalidate = false,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    retries = DEFAULT_RETRIES,
+  } = {}
+) {
+  const log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'cloudinary_upload',
+        traceId: randomUUID(),
+        ...data,
+      }));
+    } catch (_) {
+      // ignore logging errors
+    }
+  };
+
+  log({ event: 'start', folder, publicId, hasImage: Boolean(image) });
+  if (!image) throw new Error('uploadImage: "image" is required');
+
+  const options = {
+    resource_type: 'image',
+    folder,
+    tags,
+    public_id: publicId,
+    overwrite,
+    invalidate,
+    timeout: timeoutMs,
+  };
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const t0 = Date.now();
+    try {
+      const result = await cloudinary.v2.uploader.upload(image, options);
+      const { secure_url, public_id } = result || {};
+      if (!secure_url || !public_id) {
+        throw new Error('Cloudinary did not return secure_url/public_id');
+      }
+      log({ event: 'success', public_id, secure_url, duration_ms: Date.now() - t0 });
+      return { url: secure_url, id: public_id, secure_url, public_id, result };
+    } catch (err) {
+      lastErr = err;
+      const code = err?.http_code || err?.statusCode;
+      const msg = err?.message || String(err);
+      log({ event: 'error', attempt, retries, code, message: msg });
+      if (attempt < retries && isRetryable(err)) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(`Cloudinary upload failed${code ? ` (${code})` : ''}: ${msg}`);
+    }
+  }
+  throw lastErr || new Error('Unknown Cloudinary upload error');
+}
+
+================
+File: app/services/framemock.js
+================
+import fetch from 'node-fetch';
+import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const DEFAULT_TIMEOUT_MS = 15000; // 15s
+const DEFAULT_RETRIES = 2; // total attempts = retries + 1
+const BASE_DELAY_MS = 250;
+
+const STAGE = 'frame_mock';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isHttpRetryable(res) {
+  return res.status === 429 || (res.status >= 500 && res.status <= 599);
+}
+
+function assertAbsoluteHttpUrl(url) {
+  if (typeof url !== 'string' || url.trim() === '') {
+    throw new Error('paintingUrl must be a non-empty string');
+  }
+  let u;
+  try {
+    u = new URL(url);
+  } catch (_) {
+    throw new Error('paintingUrl must be a valid absolute URL');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('paintingUrl must be http(s)');
+  }
+}
+
+async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRIES, headers = {} } = {}) {
+  const traceId = randomUUID();
+  let overallStart = Date.now();
+  let attemptStart = null;
+  log({ event: 'request_start', traceId, url });
+
+  let attempt = 0;
+  let lastErr;
+
+  while (attempt <= retries) {
+    attemptStart = Date.now();
+    log({ event: 'attempt_start', traceId, attempt: attempt + 1, timeout_ms: timeoutMs ?? DEFAULT_TIMEOUT_MS });
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          ...headers,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        // Non-2xx. Decide if retryable.
+        if (isHttpRetryable(res) && attempt < retries) {
+          log({ event: 'retryable_http', traceId, status: res.status, attempt: attempt + 1 });
+          // Consume body to free sockets
+          try { await res.text(); } catch { /* ignore */ }
+          attempt++;
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          await sleep(delay);
+          continue;
+        }
+
+        log({ event: 'http_error', traceId, status: res.status, statusText: res.statusText });
+
+        let snippet = '';
+        try {
+          const text = await res.text();
+          snippet = text ? `: ${text.slice(0, 200)}` : '';
+        } catch { /* ignore */ }
+        const err = new Error(`Frame mock-up failed (${res.status} ${res.statusText})${snippet}`);
+        err.status = res.status;
+        throw err;
+      }
+
+      // Try to parse JSON
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        log({ event: 'invalid_json', traceId });
+        throw new Error('Frame mock-up service returned invalid JSON');
+      }
+      log({ event: 'success', traceId, duration_ms: Date.now() - overallStart });
+      return data;
+    } catch (err) {
+      lastErr = err;
+      log({ event: err && err.name === 'AbortError' ? 'timeout' : 'network_error', traceId, name: err?.name, message: err?.message });
+      const isAbort = err && err.name === 'AbortError';
+      const canRetry = !isAbort && attempt < retries; // network errors (ECONNRESET, etc.)
+      if (canRetry) {
+        attempt++;
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        log({ event: 'retry_network', traceId, attempt: attempt + 1, delay_ms: BASE_DELAY_MS * Math.pow(2, attempt - 1) });
+        await sleep(delay);
+        continue;
+      }
+      throw isAbort ? new Error('Frame mock-up request timed out') : err;
+    } finally {
+      clearTimeout(timer);
+      if (attemptStart) {
+        log({ event: 'attempt_end', traceId, attempt: attempt + 1, duration_ms: Date.now() - attemptStart });
+      }
+    }
+  }
+  throw lastErr || new Error('Unknown frame mock-up error');
+}
+
+/**
+ * Call the frame-mock service to create staged mockups for a painting image URL.
+ * @param {string} paintingUrl - Absolute URL to the painting image.
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {Promise<string[]>} Array of mockup image URLs
+ */
+export async function createMockups({
+  frameUrl1,
+  frameUrl2,
+  frameUrl3,
+  artUrl,
+  orientation = 'horizontal',
+  enableInnerShadow = true
+}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const traceId = randomUUID();
+  log({ event: 'createMockups_start', traceId, artHost: (() => { try { return new URL(artUrl).host; } catch { return 'invalid'; } })() });
+
+  if (!env.frameMockUrl) {
+    throw new Error('Missing env.frameMockUrl');
+  }
+  assertAbsoluteHttpUrl(artUrl);
+
+  const headers = {};
+  if (env.frameMockApiKey) {
+    headers['Authorization'] = `Bearer ${env.frameMockApiKey}`;
+  }
+
+  const payload = {
+    frameUrl1,
+    frameUrl2,
+    frameUrl3,
+    artUrl,
+    orientation: orientation || "horizontal",
+    enableInnerShadow: Boolean(enableInnerShadow)
+  };
+
+  const data = await postJsonWithRetry(
+    env.frameMockUrl,
+    payload,
+    { timeoutMs, headers }
+  );
+
+  const mockups = [data?.imageUrl1, data?.imageUrl2, data?.imageUrl3].filter((m) => typeof m === 'string' && m);
+  if (mockups.length === 0) {
+    throw new Error('Frame mock-up response missing valid imageUrl fields');
+  }
+  log({ event: 'createMockups_success', traceId, mockups: mockups.length });
+  return mockups;
+}
+
+================
+File: app/services/google.js
+================
+import fetch from 'node-fetch';
+
+// Restore imageSearch alongside new getPlaceDetails
+
+/**
+ * Search Google Images (Custom Search API) for a query and return results.
+ * Expects GOOGLE_API_KEY and GOOGLE_CX in environment variables.
+ */
+export async function imageSearch(query, num = 10) {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  const cx = process.env.GOOGLE_CX;
+  if (!apiKey || !cx) {
+    throw new Error('Google API key (GOOGLE_API_KEY) or CX (GOOGLE_CX) not set');
+  }
+  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+    query
+  )}&searchType=image&num=${num}&key=${apiKey}&cx=${cx}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.items) return [];
+    return data.items.map(item => ({
+      url: item.link,
+      thumbnail: item.image?.thumbnailLink,
+      contextLink: item.image?.contextLink,
+      mime: item.mime,
+      width: item.image?.width,
+      height: item.image?.height
+    }));
+  } catch (err) {
+    console.error('[Google imageSearch] Error:', err);
+    return [];
+  }
+}
+
+// Add Google Places enrichment utility
+
+/**
+ * Fetch detailed Google Places data for a given search term.
+ * 1. Text Search to find place_id
+ * 2. Place Details to get structured info
+ */
+export async function getPlaceDetails(searchTerm) {
+  if (!process.env.GOOGLE_PLACES_API_KEY) {
+    console.warn('[Google Places] API key not set in GOOGLE_PLACES_API_KEY');
+    return null;
+  }
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+
+  try {
+    // Step 1: Text Search
+    const textUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(searchTerm)}&key=${apiKey}`;
+    const textRes = await fetch(textUrl);
+    const textData = await textRes.json();
+    if (!textData.results || !textData.results.length) {
+      console.warn('[Google Places] No results for', searchTerm);
+      return null;
+    }
+    const placeId = textData.results[0].place_id;
+    if (!placeId) {
+      console.warn('[Google Places] Missing place_id for', searchTerm);
+      return null;
+    }
+
+    // Step 2: Place Details
+    const fields = [
+      'name',
+      'formatted_address',
+      'international_phone_number',
+      'website',
+      'geometry',
+      'opening_hours',
+      'rating',
+      'user_ratings_total',
+      'types',
+      'photos'
+    ].join(',');
+    const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${fields}&key=${apiKey}`;
+    const detailRes = await fetch(detailUrl);
+    const detailData = await detailRes.json();
+    if (detailData.status !== 'OK' || !detailData.result) {
+      console.warn('[Google Places] Place Details fetch failed for', searchTerm, detailData.status);
+      return null;
+    }
+
+    const r = detailData.result;
+    return {
+      g_place_id: placeId,
+      g_name: r.name || null,
+      g_formatted_address: r.formatted_address || null,
+      g_phone: r.international_phone_number || null,
+      g_website: r.website || null,
+      g_lat: r.geometry?.location?.lat ?? null,
+      g_lng: r.geometry?.location?.lng ?? null,
+      g_rating: r.rating ?? null,
+      g_user_ratings_total: r.user_ratings_total ?? null,
+      g_types: Array.isArray(r.types) ? r.types.join(',') : null,
+      g_photo_refs: Array.isArray(r.photos) ? r.photos.map(p => p.photo_reference) : []
+    };
+  } catch (err) {
+    console.error('[Google Places] Error fetching details for', searchTerm, err);
+    return null;
+  }
+}
+
+================
+File: app/services/n8n.js
+================
+import axios from 'axios';
+
+/**
+ * Sends the processed artwork payload to the n8n webhook.
+ * @param {Object} payload - The full JSON body matching the expected n8n format.
+ */
+export async function sendProduct(payload) {
+  try {
+    const res = await axios.post(
+      'https://n8n101301.hostkey.in/webhook/7686524a-8012-485a-bc49-076d980323f8',
+      payload,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 15000
+      }
+    );
+    console.log('[n8n] Webhook sent successfully:', res.status);
+  } catch (err) {
+    console.error('[n8n] Error sending webhook:', err.message);
+    if (err.response) {
+      console.error('Response data:', err.response.data);
+    }
+  }
+}
+
+================
+File: app/services/openai.js
+================
+import OpenAI from 'openai';
+import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const openaiClient = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || env.openaiKey,
+  baseURL: 'https://api.openai.com/v1'
+});
+
+const piapiClient = new OpenAI({
+  apiKey: process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey,
+  baseURL: 'https://api-direct.piapi.ai/v1/chat/completions'
+});
+
+const STAGE = 'openai';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
+
+function enhanceError(err, context = {}) {
+  const e = new Error(
+    `OpenAI request failed${context.stage ? ` at ${context.stage}` : ''}: ${err?.message || err}`
+  );
+  e.cause = err;
+  e.context = context;
+  return e;
+}
+
+function extractBalancedJson(text) {
+  if (typeof text !== 'string') return null;
+  const tryBraces = () => {
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          return text.slice(start, i + 1);
+        }
+      }
+    }
+    return null;
+  };
+  const tryBrackets = () => {
+    const start = text.indexOf('[');
+    if (start === -1) return null;
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '[') depth++;
+      else if (ch === ']') {
+        depth--;
+        if (depth === 0) {
+          return text.slice(start, i + 1);
+        }
+      }
+    }
+    return null;
+  };
+  return tryBraces() ?? tryBrackets();
+}
+
+function parseJsonLoose(text) {
+  // First, try direct parse
+  try {
+    return JSON.parse(text);
+  } catch {}
+  // Next, try to extract a balanced JSON object/array from the text
+  const snippet = extractBalancedJson(text);
+  if (snippet) {
+    try {
+      return JSON.parse(snippet);
+    } catch {}
+  }
+  // Give up with a helpful error
+  const preview = (text || '').slice(0, 240);
+  throw new Error(`Failed to parse JSON from model output. Preview: ${preview}`);
+}
+
+function assertTopLevelTypeMatches(value, schema) {
+  if (!schema || !schema.type) return; // best-effort only
+  const expected = schema.type;
+  const actual = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value);
+  if (expected === 'object' && typeof value !== 'object') {
+    throw new Error(`Expected JSON object but got ${actual}`);
+  }
+  if (expected === 'array' && !Array.isArray(value)) {
+    throw new Error(`Expected JSON array but got ${actual}`);
+  }
+}
+
+function normalizeSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+
+  if (schema.type === 'object') {
+    const inputProps = schema.properties || {};
+    const properties = {};
+    for (const [k, v] of Object.entries(inputProps)) {
+      properties[k] = normalizeSchema(v);
+    }
+    const required = Object.keys(properties);
+    return {
+      type: 'object',
+      properties,
+      required,
+      additionalProperties: false,
+    };
+  }
+
+  if (schema.type === 'array') {
+    return {
+      type: 'array',
+      items: normalizeSchema(schema.items),
+    };
+  }
+
+  return schema; // primitives as-is
+}
+
+/**
+ * Simple chat helper (backwards compatible)
+ */
+export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'chat_start', traceId, model, temperature });
+  try {
+    const { choices } = await openaiClient.chat.completions.create({
+      model,
+      temperature,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    });
+    log({ event: 'chat_response', traceId, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
+    const content = choices?.[0]?.message?.content;
+    if (typeof content !== 'string') {
+      throw new Error('Empty response from model');
+    }
+    log({ event: 'chat_success', traceId, duration_ms: Date.now() - start, content_len: typeof content === 'string' ? content.length : 0 });
+    return content.trim();
+  } catch (err) {
+    log({ event: 'chat_error', traceId, name: err?.name, message: err?.message });
+    throw enhanceError(err, { stage: 'chat', model });
+  }
+}
+
+/**
+ * Structured JSON chat helper.
+ * Uses response_format to request strict JSON and adds lightweight validation & retries.
+ *
+ * @param {Object} args
+ * @param {string} args.system
+ * @param {string} args.user
+ * @param {Object} [args.schema] - JSON Schema (draft-like) with at least a top-level `type` of 'object' or 'array'.
+ * @param {number} [args.temperature=0]
+ * @param {string} [args.model='gpt-4o-mini']
+ * @param {number} [args.maxRetries=2]
+ * @returns {Promise<any>} parsed JSON
+ */
+export async function chatJson({
+  system,
+  user,
+  schema,
+  temperature = 0,
+  model = 'gpt-4o-mini',
+  maxRetries = 2,
+}) {
+  const traceId = randomUUID();
+  const overallStart = Date.now();
+  log({ event: 'chatJson_start', traceId, model, temperature, hasSchema: Boolean(schema) });
+  // Prefer strict JSON mode if supported, fall back gracefully.
+  const normalized = schema ? normalizeSchema(schema) : undefined;
+  const isArraySchema = !!normalized && normalized.type === 'array';
+  const effectiveSchema = normalized
+    ? (isArraySchema
+        ? { type: 'object', additionalProperties: false, properties: { data: normalized }, required: ['data'] }
+        : normalized)
+    : undefined;
+
+  const response_format = effectiveSchema
+    ? { type: 'json_schema', json_schema: { name: 'Output', schema: effectiveSchema, strict: true } }
+    : { type: 'json_object' };
+
+  log({ event: 'chatJson_prepared', traceId, response_format: response_format?.type, isArraySchema });
+
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const attemptStart = Date.now();
+    log({ event: 'chatJson_attempt', traceId, attempt: attempt + 1 });
+    try {
+      const { choices } = await openaiClient.chat.completions.create({
+        model,
+        temperature,
+        response_format,
+        messages: [
+          { role: 'system', content: effectiveSchema
+              ? `${system}\n\nYou must return ONLY valid minified JSON satisfying the provided schema.${isArraySchema ? ' The top-level object MUST have a single key "data" containing the array.' : ''}`
+              : `${system}\n\nYou must return ONLY valid minified JSON.` },
+          { role: 'user', content: user },
+        ],
+      });
+      log({ event: 'chatJson_response', traceId, attempt: attempt + 1, hasChoices: Array.isArray(choices), choiceCount: choices?.length ?? 0 });
+      const raw = choices?.[0]?.message?.content ?? '';
+      log({ event: 'chatJson_raw', traceId, attempt: attempt + 1, raw_len: typeof raw === 'string' ? raw.length : 0 });
+      const parsed = parseJsonLoose(raw);
+      log({ event: 'chatJson_parsed', traceId, attempt: attempt + 1 });
+
+      if (isArraySchema) {
+        if (!parsed || typeof parsed !== 'object' || !('data' in parsed)) {
+          throw new Error('Model did not return an object with a "data" array');
+        }
+        assertTopLevelTypeMatches(parsed.data, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
+        return parsed.data;
+      } else {
+        assertTopLevelTypeMatches(parsed, schema);
+        log({ event: 'chatJson_success', traceId, duration_ms: Date.now() - overallStart });
+        return parsed;
+      }
+    } catch (err) {
+      log({ event: 'chatJson_error', traceId, attempt: attempt + 1, name: err?.name, message: err?.message });
+      lastErr = err;
+      if (attempt < maxRetries) {
+        // On retry, make the instruction even more explicit
+        system = `${system}\n\nReturn ONLY minified JSON with no commentary, markdown, or code fences.`;
+        log({ event: 'chatJson_retry', traceId, next_attempt: attempt + 2 });
+        continue;
+      }
+      log({ event: 'chatJson_fail', traceId, total_duration_ms: Date.now() - overallStart });
+      throw enhanceError(lastErr, { stage: 'chatJson', model, attempt });
+    }
+  }
+}
+
+/**
+ * PiAPI image generation helper (streaming).
+ * Consumes SSE stream and extracts image_url(s).
+ */
+export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: "generateImage_start", traceId, model });
+
+  const resp = await fetch("https://api.piapi.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+            { type: "text", text: prompt }
+          ],
+        },
+      ],
+      stream: true,
+    }),
+  });
+
+  let imageUrls = [];
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of resp.body) {
+      const lines = decoder.decode(chunk).split("\n");
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const trimmed = line.replace("data:", "").trim();
+        if (trimmed === "[DONE]") continue;
+        try {
+          const data = JSON.parse(trimmed);
+
+          // Debug log raw chunk preview
+          log({ event: "generateImage_raw_chunk", traceId, preview: trimmed.slice(0, 300) });
+
+          // Process delta.content (streaming case)
+          const deltaContent = data.choices?.[0]?.delta?.content;
+          if (Array.isArray(deltaContent)) {
+            for (const part of deltaContent) {
+              if (part.type === "image_url" && part.image_url?.url) {
+                imageUrls.push(part.image_url.url);
+                log({ event: "generateImage_found_url", traceId, source: "delta", imageUrl: part.image_url.url });
+              }
+            }
+          }
+
+          // Process message.content (non-streaming final case)
+          const messageContent = data.choices?.[0]?.message?.content;
+          if (Array.isArray(messageContent)) {
+            for (const part of messageContent) {
+              if (part.type === "image_url" && part.image_url?.url) {
+                imageUrls.push(part.image_url.url);
+                log({ event: "generateImage_found_url", traceId, source: "message", imageUrl: part.image_url.url });
+              }
+            }
+          }
+
+          // Regex fallback for any image-like URLs
+          const str = JSON.stringify(data);
+          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+          if (urlMatches) {
+            for (const u of urlMatches) {
+              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
+                imageUrls.push(u);
+                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
+              }
+            }
+          }
+        } catch (e) {
+          log({ event: "generateImage_chunk_parse_failed", traceId, line: trimmed.slice(0, 200) });
+        }
+      }
+    }
+  } catch (err) {
+    log({ event: "generateImage_error", traceId, message: err?.message });
+    throw enhanceError(err, { stage: "generateImage", model });
+  }
+
+  // Deduplicate & normalize
+  imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
+
+  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+  if (imageUrls.length === 0) {
+    throw new Error("PiAPI stream did not include any image URLs");
+  }
+  return imageUrls;
+}
+
+export { openaiClient, piapiClient };
+
+================
+File: app/services/openverse.js
+================
+import fetch from 'node-fetch';
+import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const STAGE = 'openverse_image_search';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // ignore logging errors
+  }
+}
+
+/**
+ * Search Openverse images.
+ * Mirrors the interface of google.imageSearch for interchangeability.
+ * @param {string} query - Search term.
+ * @param {number} num - Number of results to return. Defaults to 10.
+ * @returns {Promise<Array<{url: string, context: string}>>}
+ */
+export async function imageSearch(query, num = 10) {
+  const traceId = randomUUID();
+  const start = Date.now();
+  log({ event: 'start', traceId, query, num });
+
+  try {
+    const qs = new URLSearchParams({
+      q: query,
+      page_size: num.toString(),
+      page: '1'
+    });
+
+    const headers = {};
+    if (env.openverseApiKey) {
+      headers['Authorization'] = `Bearer ${env.openverseApiKey}`;
+    }
+
+    const res = await fetch(`https://api.openverse.org/v1/images/?${qs}`, {
+      headers
+    });
+
+    log({ event: 'fetched', traceId, status: res.status, statusText: res.statusText });
+
+    const { results = [] } = await res.json();
+
+    log({ event: 'success', traceId, count: results.length, duration_ms: Date.now() - start });
+
+    // Map Openverse fields to match Google style objects, but include all metadata
+    return results.map(i => ({
+      url: i.url,
+      context: i.foreign_landing_url || null,
+      id: i.id,
+      title: i.title || null,
+      creator: i.creator || null,
+      creator_url: i.creator_url || null,
+      license: i.license || null,
+      license_version: i.license_version || null,
+      license_url: i.license_url || null,
+      source: i.source || null,
+      category: i.category || null,
+      provider: i.provider || null,
+      thumbnail: i.thumbnail || null,
+      detail_url: i.detail_url || null,
+      width: i.width || null,
+      height: i.height || null
+    }));
+  } catch (err) {
+    log({ event: 'error', traceId, name: err?.name, message: err?.message });
+    throw err;
+  }
+}
+
+================
+File: app/services/shopify.js
+================
+import fetch from 'node-fetch';
+import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+
+const STAGE = 'shopify';
+function log(data = {}) {
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: STAGE,
+      ...data,
+    }));
+  } catch (_) {
+    // best-effort logging only
+  }
+}
+
+const API_VERSION = env.shopifyVersion || '2024-04';
+const shopDomain = String(env.shop)
+  .replace(/^https?:\/\//, '')
+  .replace(/\/$/, '');
+const API_BASE = `https://${shopDomain}/admin/api/${API_VERSION}`;
+
+const DEFAULT_TIMEOUT_MS = 20000;
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 300;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function authHeaders() {
+  return {
+    'X-Shopify-Access-Token': env.shopToken,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+}
+
+function isRetryable(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+async function fetchJson(path, { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = {}, attempt = 0) {
+  const traceId = randomUUID();
+  const startedAt = Date.now();
+  log({ event: 'request_start', traceId, method, path });
+
+  const url = `${API_BASE}${path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { method, headers: authHeaders(), body, signal: controller.signal });
+
+    log({ event: 'response', traceId, status: res.status, statusText: res.statusText, retryAfter: res.headers.get('Retry-After') });
+
+    // Retry logic for 429/5xx
+    if (!res.ok && isRetryable(res.status) && attempt < MAX_RETRIES) {
+      // Respect Retry-After if present, else do exponential backoff
+      const retryAfter = parseFloat(res.headers.get('Retry-After'));
+      const delay = Number.isFinite(retryAfter)
+        ? Math.ceil(retryAfter * 1000)
+        : BASE_DELAY_MS * Math.pow(2, attempt);
+      try { await res.text(); } catch { /* ignore body */ }
+      log({ event: 'retry', traceId, attempt: attempt + 1, status: res.status, delay_ms: delay });
+      await sleep(delay);
+      return fetchJson(path, { method, body, timeoutMs }, attempt + 1);
+    }
+
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      // Try text for better diagnostics
+      const text = await res.text().catch(() => '');
+      if (!res.ok) {
+        throw new Error(`Shopify ${method} ${path} failed (${res.status}): ${text.slice(0, 300)}`);
+      }
+      throw new Error(`Unexpected non-JSON response from Shopify at ${path}: ${text.slice(0, 300)}`);
+    }
+
+    if (!res.ok) {
+      const errMsg = typeof payload?.errors === 'string'
+        ? payload.errors
+        : JSON.stringify(payload?.errors || payload);
+      log({ event: 'http_error', traceId, method, path, status: res.status, error: errMsg });
+      throw new Error(`Shopify ${method} ${path} failed (${res.status}): ${errMsg}`);
+    }
+
+    return payload;
+  } catch (err) {
+    log({ event: 'network_error', traceId, name: err?.name, message: err?.message });
+    if (err && err.name === 'AbortError') {
+      throw new Error(`Shopify ${method} ${path} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    log({ event: 'request_end', traceId, duration_ms: Date.now() - startedAt });
+    clearTimeout(timer);
+  }
+}
+
+function normalizeImages(images) {
+  if (!images) return [];
+  // Accept strings (src) or objects { src, alt }
+  return images
+    .filter(Boolean)
+    .map((img) => {
+      if (typeof img === 'string') return { src: img };
+      if (typeof img === 'object' && img.src) {
+        const out = { src: String(img.src) };
+        if (img.alt) out.alt = String(img.alt);
+        return out;
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+export async function createCollection(title, bodyHtml, handle) {
+  const traceId = randomUUID();
+  log({ event: 'create_collection_start', traceId, title, handle });
+
+  const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle } });
+  const data = await fetchJson('/custom_collections.json', { method: 'POST', body });
+  const id = data?.custom_collection?.id;
+  log({ event: 'create_collection_response', traceId, hasId: Boolean(id) });
+  if (!id) throw new Error('Shopify did not return custom_collection.id');
+  log({ event: 'create_collection_success', traceId, id });
+  return id; // backward compatible
+}
+
+/**
+ * Create a product and (optionally) attach ALL provided metafields.
+ *
+ * @param {Object} params
+ * @param {string} params.title - Product title (required)
+ * @param {string} [params.bodyHtml]
+ * @param {Array<string|{src:string,alt?:string}>} [params.images]
+ * @param {Array<{namespace:string,key:string,type:string,value:string}>} [params.metafields]
+ * @param {string} [params.handle]
+ * @param {string} [params.status] - 'active' | 'draft' | 'archived'
+ * @param {string|string[]} [params.tags]
+ * @param {string} [params.vendor]
+ * @param {string} [params.productType]
+ * @returns {Promise<number>} Product ID
+ */
+export async function createProduct({
+  title,
+  bodyHtml,
+  images,
+  metafields,
+  handle,
+  status = 'draft',
+  tags,
+  vendor,
+  productType,
+}) {
+  if (!title) throw new Error('createProduct: title is required');
+
+  const traceId = randomUUID();
+  log({ event: 'create_product_start', traceId, title, images_count: Array.isArray(images) ? images.length : 0, metafields_count: Array.isArray(metafields) ? metafields.length : 0, status });
+
+  const product = {
+    title,
+    body_html: bodyHtml,
+    handle,
+    status,
+    tags: Array.isArray(tags) ? tags.join(', ') : tags,
+    vendor,
+    product_type: productType,
+    images: normalizeImages(images),
+  };
+
+  const createBody = JSON.stringify({ product });
+  const data = await fetchJson('/products.json', { method: 'POST', body: createBody });
+  log({ event: 'create_product_res', traceId });
+  const created = data?.product;
+  log({ event: 'create_product_created', traceId, hasId: Boolean(created?.id) });
+  if (!created?.id) throw new Error('Shopify did not return product.id');
+  log({ event: 'create_product_success', traceId, productId: created.id });
+
+  // Attach ALL metafields, if provided
+  if (Array.isArray(metafields) && metafields.length) {
+    for (const mf of metafields) {
+      if (!mf || !mf.namespace || !mf.key || !mf.type) {
+        // Skip invalid entries but keep going
+        // eslint-disable-next-line no-console
+        console.warn('Skipping invalid metafield; expected {namespace,key,type,value}', mf);
+        continue;
+      }
+      const mfBody = JSON.stringify({ metafield: mf });
+      log({ event: 'metafield_attach', traceId, productId: created.id, namespace: mf.namespace, key: mf.key, type: mf.type });
+      await fetchJson(`/products/${created.id}/metafields.json`, { method: 'POST', body: mfBody });
+    }
+  }
+
+  log({ event: 'create_product_done', traceId, productId: created.id });
+  return created.id; // backward compatible
+}
+
+================
+File: app/workflows/artwork.js
+================
+import db from '../db/client.js';
+import fetch from 'node-fetch';
+import { chat, generateImage } from '../services/openai.js';
+import { createMockups } from '../services/framemock.js';
+import { uploadImage } from '../services/cloudinary.js';
+import { qPublish } from '../queue/queues.js';
+
+// Read configuration (prefer env helper, fallback to process.env)
+import { env } from '../config/env.js';
+const PAINT_ENDPOINT = (env && (env.paintEndpoint || env.PAINT_ENDPOINT)) || process.env.PAINT_ENDPOINT;
+const CLOUDINARY_CLOUD_NAME = (env && (env.cloudinaryCloudName || env.cloudName || env.CLOUDINARY_CLOUD_NAME)) || process.env.CLOUDINARY_CLOUD_NAME;
+
+const PAINT_API_KEY = process.env.PAINT_API_KEY || (env && (env.paintApiKey || env.PAINT_API_KEY));
+function isPiapiEndpoint(url) { try { return new URL(url).host.endsWith('piapi.ai'); } catch { return false; } }
+
+export default async function artwork(job) {
+  const { photoId } = job.data;
+
+  // --- Deduplication check ---
+  try {
+    const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+    if (await tracker.isProcessed(photoId)) {
+      console.log(`[artwork] Artwork for ${photoId} already processed or in progress — skipping PiAPI call`);
+      return;
+    }
+    // Mark as in-progress and initialise attempt counter if not set
+    const attemptKey = `artwork_attempts:${photoId}`;
+    const currentAttempts = parseInt(process.env[`ATTEMPT_${photoId}`] || '0', 10);
+    if (currentAttempts >= 3) {
+      console.log(`[artwork] Max retry attempts reached for ${photoId}, skipping`);
+      return;
+    }
+    process.env[`ATTEMPT_${photoId}`] = String(currentAttempts + 1);
+    await tracker.markInProgress(photoId);
+  } catch (e) {
+    console.warn('[artwork] Dedupe tracker unavailable or failed', e);
+  }
+  const photo = await db('photos').where({ id: photoId }).first();
+  if (!photo || !photo.processed) return;
+
+  if (!PAINT_ENDPOINT) {
+    throw new Error('PAINT_ENDPOINT is not configured');
+  }
+
+  try {
+    // Build the source image URL for the paint service
+    const imageSource =
+      photo.secure_url ||
+      (CLOUDINARY_CLOUD_NAME
+        ? `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/image/upload/${photo.cloudinary_id}`
+        : null);
+
+    if (!imageSource) {
+      throw new Error('Cannot derive source image URL (missing photo.secure_url and CLOUDINARY_CLOUD_NAME).');
+    }
+
+    // Will hold the final artwork URL we use across steps
+    // For multiple images
+    let painting_urls = [];         // array of raw URLs from paint service
+    let finalPaintingUrls = [];     // array of Cloudinary (preferred) or fallback to painting_urls
+
+    const normalizeUrl = (u) =>
+      String(u)
+        .trim()
+        .replace(/^['"(]+|[)'"]+$/g, '')   // strip leading '(' '" and trailing ) '"
+        .replace(/\\u0026/g, '&')          // decode common escapes from SSE JSON
+        .replace(/\\u003d/g, '=')
+        .replace(/\\u002F/g, '/')
+        .replace(/\\\//g, '/');
+
+    // Choose request shape based on endpoint
+    const usePiapi = isPiapiEndpoint(PAINT_ENDPOINT);
+    console.log(`[artwork] Starting job for photoId=${photoId}, using endpoint: ${PAINT_ENDPOINT}, usePiapi=${usePiapi}`);
+    console.log(`[artwork] Source image URL: ${imageSource}`);
+    if (usePiapi && !PAINT_API_KEY) {
+      throw new Error('PAINT_API_KEY is required for PiAPI endpoint');
+    }
+
+    // Fetch enabled style prompts from DB
+    const { getEnabled } = await import('../db/stylePrompts.js');
+    const enabledPrompts = await getEnabled();
+    if (!enabledPrompts || enabledPrompts.length === 0) {
+      console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
+      return;
+    }
+
+    /// Loop for each style prompt, process independently
+    let res; // Declare res in the outer scope of the for-loop
+    for (const stylePrompt of enabledPrompts) {
+      const controller = new AbortController();
+      // PiAPI can take up to 300s – set generous timeout
+      const timeoutId = setTimeout(() => controller.abort(), 310_000);
+
+      try {
+        if (usePiapi) {
+          // --- DEBUG LOGS START ---
+          console.log('[artwork][DEBUG] Piapi debug pre-flight:');
+          console.log('[artwork][DEBUG] usePiapi:', usePiapi);
+          console.log('[artwork][DEBUG] PAINT_ENDPOINT:', PAINT_ENDPOINT);
+          console.log('[artwork][DEBUG] PAINT_API_KEY present:', !!PAINT_API_KEY);
+          console.log('[artwork][DEBUG] imageSource:', imageSource);
+          try {
+            const headRes = await fetch(imageSource, { method: 'HEAD' });
+            console.log('[artwork][DEBUG] image HEAD status:', headRes.status);
+            if (!headRes.ok) console.warn('[artwork][DEBUG] Image URL not accessible to Piapi');
+          } catch (e) {
+            console.warn('[artwork][DEBUG] Error checking image URL reachability:', e);
+          }
+          // --- DEBUG LOGS END ---
+// Use updated generateImage helper with both prompt and imageUrl
+          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${stylePrompt.text}`);
+          const imageUrls = await generateImage({
+            prompt: stylePrompt.text,
+            imageUrl: imageSource,
+          });
+          let localPromptPaintingUrls = [];
+          if (imageUrls && imageUrls.length > 0) {
+            localPromptPaintingUrls = imageUrls;
+          } else {
+            console.warn('[artwork] No image URLs returned from PiAPI generateImage()');
+          }
+          res = { status: imageUrls && imageUrls.length > 0 ? 200 : 500, ok: imageUrls && imageUrls.length > 0, body: null, promptPaintingUrls: localPromptPaintingUrls };
+        } else {
+          console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
+          res = await fetch(PAINT_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(PAINT_API_KEY ? { 'Authorization': `Bearer ${PAINT_API_KEY}` } : {})
+            },
+            body: JSON.stringify({ image: imageSource, prompt: stylePrompt.text }),
+            signal: controller.signal
+          });
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // Removed redundant post-loop res.status log to prevent ReferenceError when res is undefined
+
+      // Handle PiAPI SSE stream parsing
+      // Use the PiAPI-provided list if present on res, otherwise fallback to empty array
+      let promptPaintingUrls = (res && res.promptPaintingUrls) ? res.promptPaintingUrls : [];
+      let promptFinalUrls = [];
+
+      if (!usePiapi) {
+        const data = await res.json();
+        if (data && data.painting_url) promptPaintingUrls = [normalizeUrl(data.painting_url)];
+      }
+
+      // Upload each to Cloudinary
+      for (let i = 0; i < promptPaintingUrls.length; i++) {
+        let finalUrl = promptPaintingUrls[i];
+        try {
+          const { public_id, secure_url } = await uploadImage(
+            String(finalUrl),
+            { folder: 'art-factory/artwork', publicId: `artwork_${photoId}_${stylePrompt.id}_${i}` }
+          );
+          if (secure_url) finalUrl = secure_url;
+        } catch (e) {
+          console.warn('[artwork] Upload failed for', finalUrl, e);
+        }
+        promptFinalUrls.push(finalUrl);
+      }
+
+      // Fallback
+      if (promptFinalUrls.length === 0) promptFinalUrls = promptPaintingUrls;
+
+      // Description
+      const mainPaintingUrl = promptFinalUrls[0];
+      let description = '';
+      if (mainPaintingUrl) {
+        // Load system prompt for artwork description from DB
+        const { getByKey } = await import('../db/systemPrompts.js');
+        const sysPromptRow = await getByKey('artwork_description_system');
+        const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
+
+        try {
+          description = await chat(
+            sysPrompt,
+            `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+          );
+        } catch (e) {
+          console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
+        }
+      } else {
+        console.warn('[artwork] No mainPaintingUrl found, skipping description generation.');
+      }
+
+      // Mark complete
+      try {
+        const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+        await tracker.markCompleted(photoId);
+      } catch (e) {
+        console.warn('[artwork] Could not mark artwork complete in tracker', e);
+      }
+
+      // Save to DB
+      for (let i = 0; i < promptFinalUrls.length; i++) {
+        const url = promptFinalUrls[i];
+        const desc = (i === 0) ? description : '';
+        const inserted = await db('artwork')
+          .insert({ photo_id: photoId, image_url: url, description: desc })
+          .onConflict('photo_id').ignore() // prevent duplicate key crash
+          .returning(['id']);
+        const artId = inserted?.[0]?.id;
+        if (!artId) {
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this style.`);
+          // Avoid any undefined variables from lingering from earlier steps
+          res = null;
+          continue;
+        }
+
+        if (i === 0) {
+          // Always require moderation approval before mockup/publish
+          try {
+            await db('artwork').where({ id: artId }).update({ approved_for_publish: false });
+          } catch {}
+        }
+      }
+    }
+
+    console.log(`[artwork] Paint service response status: ${res.status}`);
+
+    if (usePiapi) {
+      // --- RETRY LOGIC for PiAPI ---
+      let attempt = 0;
+      let maxAttempts = 3;
+      let foundImageLinks = false;
+      let lastChunks = '';
+      while (attempt < maxAttempts && !foundImageLinks) {
+        if (attempt > 0) {
+          console.warn(`[artwork] PiAPI image URL not found, retrying... attempt ${attempt + 1}/${maxAttempts}`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        attempt++;
+        let localController = new AbortController();
+        let localTimeoutId = setTimeout(() => localController.abort(), 310_000);
+        let localRes;
+        try {
+          console.log('[artwork] Sending request to PiAPI paint endpoint...');
+          const body = {
+            model: 'gpt-4o-image',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'image_url', image_url: { url: imageSource } },
+                  { type: 'text', text: 'Generate a framed fine-art style painting based on this reference photo. Output an image' }
+                ]
+              }
+            ],
+            stream: true
+          };
+          localRes = await fetch(PAINT_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'text/event-stream',
+              'Authorization': `Bearer ${PAINT_API_KEY}`
+            },
+            body: JSON.stringify(body),
+            signal: localController.signal
+          });
+        } finally {
+          clearTimeout(localTimeoutId);
+        }
+        console.log(`[artwork] PiAPI paint service response status: ${localRes.status}`);
+        console.log('[artwork] Reading PiAPI stream response...');
+        let chunks = '';
+        for await (const chunk of localRes.body) {
+          chunks += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        }
+        lastChunks = chunks;
+        // Find all URLs matching image extensions
+        let urlMatches = chunks.match(/https?:\/\/[^\s"'()\\]+/g);
+        let imgCandidates = [];
+        if (urlMatches) {
+          imgCandidates = urlMatches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u));
+        }
+        // Also, parse JSON lines for embedded image links
+        const jsonLines = chunks.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of jsonLines) {
+          try {
+            const obj = JSON.parse(line.replace(/^data:\s*/, ''));
+            const str = JSON.stringify(obj);
+            // Find all image URLs in the JSON string
+            const matches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+            if (matches && matches.length > 0) {
+              for (const m of matches) {
+                if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(m)) {
+                  imgCandidates.push(m);
+                }
+              }
+            }
+          } catch (_) { /* ignore */ }
+        }
+        // Deduplicate
+        painting_urls = [...new Set(imgCandidates.map(normalizeUrl))];
+        if (painting_urls.length > 0) {
+          foundImageLinks = true;
+          console.log('[artwork] Found candidate image URLs in stream:', painting_urls);
+        }
+      }
+      if (!painting_urls || painting_urls.length === 0) {
+        console.error('[artwork] PiAPI stream did not include any image URLs');
+        throw new Error('PiAPI stream did not include an image URL');
+      }
+      // --- Upload all generated paintings to Cloudinary ---
+      for (let i = 0; i < painting_urls.length; ++i) {
+        const painting_url = painting_urls[i];
+        let finalUrl = painting_url;
+        try {
+          console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
+          console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
+          const { public_id, secure_url } = await uploadImage(
+            String(painting_url),
+            { folder: 'art-factory/artwork', publicId: `artwork_${photoId}_${i}` }
+          );
+          if (secure_url) {
+            finalUrl = secure_url;
+            console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+          } else {
+            console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+          }
+        } catch (e) {
+          console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
+        }
+        finalPaintingUrls.push(finalUrl);
+      }
+    } else {
+      const data = await res.json();
+      // Legacy API: only one painting_url
+      let painting_url = data && data.painting_url;
+      if (!painting_url || typeof painting_url !== 'string') {
+        throw new Error('Paint service did not return a valid painting_url');
+      }
+      painting_url = normalizeUrl(painting_url);
+      console.log('[artwork] Painting URL resolved from legacy service:', painting_url);
+      painting_urls = [painting_url];
+      // --- Upload painting to Cloudinary ---
+      let finalUrl = painting_url;
+      try {
+        console.log('[artwork] Uploading painting to Cloudinary from URL:', painting_url);
+        console.log('[artwork] Cloudinary upload args types:', typeof painting_url, 'options');
+        const { public_id, secure_url } = await uploadImage(
+          String(painting_url),
+          { folder: 'art-factory/artwork', publicId: `artwork_${photoId}` }
+        );
+        if (secure_url) {
+          finalUrl = secure_url;
+          console.log('[artwork] Painting uploaded to Cloudinary:', secure_url, 'public_id:', public_id);
+        } else {
+          console.warn('[artwork] Cloudinary upload returned no secure_url, keeping original paint URL');
+        }
+      } catch (e) {
+        console.warn('[artwork] Cloudinary upload failed, falling back to paint URL. src=', painting_url, 'error=', e && (e.message || e));
+      }
+      finalPaintingUrls = [finalUrl];
+    }
+
+    // Fallback: if upload failed and finalPaintingUrls wasn't set, use raw painting_urls
+    if (!finalPaintingUrls || finalPaintingUrls.length === 0) finalPaintingUrls = painting_urls;
+
+    // 2. GPT auto-description (use first painting for description)
+    const mainPaintingUrl = finalPaintingUrls[0];
+    console.log('[artwork] Requesting GPT auto-description for painting...');
+    const description = await chat(
+      'Describe a painting in 35 words.',
+      `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+    );
+
+    // Mark artwork as completed in tracker
+    try {
+      const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+      await tracker.markCompleted(photoId);
+    } catch (e) {
+      console.warn('[artwork] Could not mark artwork complete in tracker', e);
+    }
+
+    // 3. Save
+    // If DB supports an array column image_urls, prefer that; else, insert one row per image
+    let supportsArrayCol = false;
+    try {
+      // Try to insert with image_urls array column (if exists)
+      await db('artwork')
+        .insert({ photo_id: photoId, image_urls: finalPaintingUrls, description })
+        .returning(['id']);
+      supportsArrayCol = true;
+      console.log('[artwork] Inserted artwork with image_urls array column.');
+    } catch (e) {
+      // Fallback: insert one row per image_url
+      supportsArrayCol = false;
+      console.log('[artwork] image_urls array column not supported, inserting one row per image_url...');
+      for (let i = 0; i < finalPaintingUrls.length; ++i) {
+        const url = finalPaintingUrls[i];
+        // For the first image, use the GPT description; for others, use empty or generic
+        let desc = (i === 0) ? description : '';
+        const inserted = await db('artwork')
+          .insert({ photo_id: photoId, image_url: url, description: desc })
+          .returning(['id']);
+        const artId = inserted?.[0]?.id;
+        if (!artId) {
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this image.`);
+          continue;
+        }
+        // 4. Mock-ups next (best-effort) -- only for first image
+        if (i === 0) {
+// Moderation gate: require approval before publishing unless explicitly disabled
+          const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
+          if (moderateArtwork) {
+            console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
+            // ensure the flag exists (noop if column absent)
+            try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
+          } else {
+            console.log('[artwork] Skipping artwork moderation. Enqueuing publish for artworkId:', artId);
+            await qPublish.add('publish', { artworkId: artId }, { jobId: `publish:${artId}` });
+          }
+        }
+      }
+      return; // done
+    }
+
+    // If we reach here, image_urls array column is supported, so only one row inserted
+    // Get the inserted artwork id (from the first insert above)
+    const [{ id: artId }] = await db('artwork')
+      .where({ photo_id: photoId })
+      .orderBy('id', 'desc')
+      .limit(1)
+      .select('id');
+    // 4. Moderation required before mockup/publish
+    console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
+    try { await db('artwork').where({ id: artId }).update({ approved_for_publish: false }); } catch (_) {}
+  } catch (err) {
+    // Clear in-progress tracker entry on failure
+    try {
+      const tracker = await import('../services/artworkTracker.js').then(m => m.default || m);
+      await tracker.clearInProgress(photoId);
+    } catch (e) {
+      console.warn('[artwork] Could not clear in-progress state in tracker', e);
+    }
+    if (err && err.name === 'AbortError') {
+      console.error(`[artwork] Paint service request timed out after ${310}s`);
+      throw new Error('Paint service request timed out (310s)');
+    }
+    console.error('artwork workflow failed', { photoId, err });
+    throw err;
+  }
+}
+
+================
+File: app/workflows/catchment.js
+================
+import db from '../db/client.js';
+import { chat } from '../services/openai.js';
+import { createCollection } from '../services/shopify.js';
+import { qLocation } from '../queue/queues.js';
+
+import * as google from '../services/google.js';
+import * as openverse from '../services/openverse.js';
+
+export default async function catchment(job) {
+  const { catchmentId, imageSource = 'google' } = job.data;
+  const row = await db('catchments').where({ id: catchmentId }).first();
+  if (!row || row.processed) return;
+
+  const intro50 = row.intro ?? await chat(
+    'You are a concise travel copywriter. Reply with <=50 words.',
+    `Write a 50-word warm introduction to visiting ${row.name}.`
+  );
+
+  // Example: perform image search before proceeding (if required by workflow)
+  const imageService = imageSource === 'openverse' ? openverse : google;
+  // This example just fetches but doesn't yet store images — integrate per business logic
+  try {
+    const images = await imageService.imageSearch(row.name, 10);
+    if (typeof job.log === 'function') {
+      job.log({ event: 'image_search', provider: imageSource, count: images.length });
+    }
+  } catch (e) {
+    if (typeof job.log === 'function') {
+      job.log({ event: 'image_search_error', provider: imageSource, error: e.message });
+    }
+  }
+
+  const handle = row.name.toLowerCase().replace(/\s+/g, '-');
+  const shopifyId = await createCollection(row.name, intro50, handle);
+
+  await db('catchments').where({ id: catchmentId }).update({
+    intro: intro50,
+    shopify_id: shopifyId,
+    processed: true
+  });
+
+  await qLocation.add('location', { catchmentId, imageSource: row.image_source || imageSource }, { jobId: `location:${catchmentId}` });
+}
+
+================
+File: app/workflows/locations.js
+================
+import db from '../db/client.js';
+import { chatJson } from '../services/openai.js';
+import { qPhoto } from '../queue/queues.js';
+import { getPlaceDetails } from '../services/google.js';
+
+const PLACES_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string' },
+      address: { type: 'string' },
+      category: { type: 'string' },
+      description: { type: 'string' },
+      search_term: { type: 'string' },
+    },
+    required: ['name', 'search_term'],
+  },
+};
+
+function sanitizePlace(p) {
+  // Ensure strings; trim; default missing optional fields to ''
+  const s = (v) => (typeof v === 'string' ? v.trim() : '');
+  const place = {
+    name: s(p.name),
+    address: s(p.address),
+    category: s(p.category),
+    description: s(p.description),
+    search_term: s(p.search_term || p.name),
+  };
+  // Minimal validation: require name and search_term
+  if (!place.name || !place.search_term) return null;
+  return place;
+}
+
+export default async function locations(job) {
+  const { catchmentId, imageSource } = job.data;
+  const catchment = await db('catchments').where({ id: catchmentId }).first();
+  if (!catchment) return;
+
+  // Load system prompt for location places from DB
+  const { getByKey } = await import('../db/systemPrompts.js');
+  const sysPromptRow = await getByKey('location_places_system');
+  const system = sysPromptRow?.text || 'You generate clean JSON for downstream automation.';
+  const user = `Return ONLY a minified JSON array (max 10) of interesting public places within 30km of the point (lat: ${catchment.lat}, lon: ${catchment.lon}) around "${catchment.name}".
+Each item MUST follow this JSON shape: {"name": string, "address": string, "category": string, "description": string, "search_term": string}.
+The "search_term" should be what a person would type into an image search to find photos of this exact place (e.g., include the city/neighbourhood).`;
+
+  let places = [];
+  try {
+    const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0 });
+    if (!Array.isArray(raw)) return;
+
+    // sanitize, dedupe, cap at 10
+    const seen = new Set();
+    for (const item of raw) {
+      const p = sanitizePlace(item);
+      if (!p) continue;
+      const key = `${p.name.toLowerCase()}|${p.address.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      places.push(p);
+      if (places.length >= 10) break;
+    }
+  } catch (err) {
+    console.error('locations workflow: failed to get/parse places', { catchmentId, err });
+    return;
+  }
+
+  if (!places.length) return;
+
+  for (const p of places) {
+    try {
+      // Enrich with Google Places data
+      let enrichment = {};
+      try {
+        const details = await getPlaceDetails(p.search_term || p.name);
+        if (details) {
+          enrichment = details;
+        }
+      } catch (e) {
+        console.warn('locations workflow: Google Places enrichment failed', { catchmentId, place: p?.name, err: e });
+      }
+
+      const [loc] = await db('locations')
+        .insert({ 
+          ...p, 
+          catchment_id: catchmentId, 
+          image_source: catchment.image_source || imageSource || 'google',
+          ...enrichment
+        })
+        .returning('*');
+
+      if (loc && loc.id) {
+        await qPhoto.add('photo', { locationId: loc.id }, { jobId: `photo:${loc.id}` });
+      }
+    } catch (err) {
+      console.warn('locations workflow: failed to insert/enqueue', { catchmentId, place: p?.name, err });
+      continue;
+    }
+  }
+}
+
+================
+File: app/workflows/photos.js
+================
+import db from '../db/client.js';
+import { imageSearch as googleImageSearch } from '../services/google.js';
+import { imageSearch as openverseImageSearch } from '../services/openverse.js';
+import { chat } from '../services/openai.js';
+import { uploadImage } from '../services/cloudinary.js';
+import { qArtwork } from '../queue/queues.js';
+
+const KEEP_THRESHOLD = 0.65;
+const MAX_IMAGES = 10; // keep requests small; page inside imageSearch if needed
+
+function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+export default async function photos(job) {
+  const { locationId } = job.data;
+  const location = await db('locations').where({ id: locationId }).first();
+  if (!location || location.processed) return;
+
+  let images = [];
+  try {
+    const source = location.image_source || 'google';
+    if (source === 'openverse') {
+      images = await openverseImageSearch(location.search_term, MAX_IMAGES);
+    } else {
+      images = await googleImageSearch(location.search_term, MAX_IMAGES);
+    }
+  } catch (err) {
+    console.error('photos: imageSearch failed', { locationId, err });
+    images = [];
+  }
+
+  if (!Array.isArray(images) || images.length === 0) {
+    await db('locations').where({ id: locationId }).update({ processed: true });
+    return;
+  }
+
+  for (const img of images) {
+    const srcUrl = img?.url || img?.src || '';
+    if (!srcUrl) continue;
+
+    // 1) Ask GPT to score (best-effort; never throw the worker)
+    let score = 0;
+    try {
+      const scoreTxt = await chat(
+        'You rate reference photos for painting. Reply ONLY a decimal 0-1.',
+        `Score this image for painting quality (composition, subject clarity, no watermarks): ${srcUrl}`,
+        0
+      );
+      score = clamp01(Number(scoreTxt));
+    } catch (err) {
+      console.warn('photos: scoring failed; defaulting to 0', { locationId, srcUrl, err });
+      score = 0;
+    }
+
+    const kept = score >= KEEP_THRESHOLD;
+
+    // 2) Insert photo row idempotently
+    let photoRow;
+    try {
+      const insertData = { location_id: locationId, src_url: srcUrl, score, kept };
+
+      // If this is from Openverse, store the metadata fields
+      if (img.id) {
+        insertData.ov_id = img.id || null;
+        insertData.ov_title = img.title || null;
+        insertData.ov_creator = img.creator || null;
+        insertData.ov_creator_url = img.creator_url || null;
+        insertData.ov_license = img.license || null;
+        insertData.ov_license_version = img.license_version || null;
+        insertData.ov_license_url = img.license_url || null;
+        insertData.ov_source = img.source || null;
+        insertData.ov_category = img.category || null;
+        insertData.ov_provider = img.provider || null;
+        insertData.ov_thumbnail = img.thumbnail || null;
+        insertData.ov_detail_url = img.detail_url || null;
+        insertData.ov_width = img.width || null;
+        insertData.ov_height = img.height || null;
+      }
+
+      const insert = await db('photos')
+        .insert(insertData)
+        .onConflict(['location_id', 'src_url'])
+        .ignore()
+        .returning(['id']);
+
+      if (insert && insert[0]) {
+        photoRow = { id: insert[0].id };
+      } else {
+        photoRow = await db('photos')
+          .where({ location_id: locationId, src_url: srcUrl })
+          .first(['id', 'cloudinary_id', 'secure_url', 'processed', 'kept']);
+      }
+    } catch (err) {
+      console.warn('photos: failed to upsert photo row', { locationId, srcUrl, err });
+      continue;
+    }
+
+    if (!photoRow?.id) continue;
+
+    // 3) If we decided to keep it, mark for moderation but do not upload or enqueue yet
+    if (kept) {
+      try {
+        // Mark as kept but leave processed false for moderation to handle
+        if (!photoRow.processed) {
+          await db('photos').where({ id: photoRow.id }).update({
+            kept: true,
+            processed: false,
+          });
+        }
+      } catch (err) {
+        console.error('photos: marking for moderation failed', { locationId, photoId: photoRow.id, err });
+      }
+    }
+  }
+
+  // 4) Mark location processed after iterating all images
+  await db('locations').where({ id: locationId }).update({ processed: true });
+}
+
+================
+File: app/workflows/publish.js
+================
+import db from '../db/client.js';
+import * as n8n from '../services/n8n.js';
+const { sendProduct } = n8n;
+
+export default async function publish(job) {
+  const { artworkId } = job.data;
+
+  // Re-read artwork and guard against duplicate publish attempts
+  const art = await db('artwork').where({ id: artworkId }).first();
+  if (!art) return;
+  if (art.published || art.shopify_id) return; // idempotency guard
+
+  // Resolve location (for copy) and catchment (for geo lat/lon)
+  const row = await db('photos as p')
+    .join('locations as l', 'l.id', 'p.location_id')
+    .join('catchments as c', 'c.id', 'l.catchment_id')
+    .where('p.id', art.photo_id)
+    .first({
+      location_name: 'l.name',
+      location_description: 'l.description',
+      location_category: 'l.category',
+      formatted_address: 'l.address',
+      latitude: 'l.g_lat',
+      longitude: 'l.g_lng'
+    });
+
+  console.log("DEBUG publish: resolved location row", row);
+
+  if (!row) {
+    throw new Error(`Unable to resolve location/catchment for photo ${art.photo_id}`);
+  }
+
+  const title = `${row.location_name} – Bomberg Series`;
+  const bodyHtml = `${art.description ?? ''}<br><br><em>${row.location_description ?? ''}</em>`;
+
+  // Attempt mockup generation if none exist
+  let mockups = [];
+  let mu = art.mockup_urls;
+
+  if (!mu || (Array.isArray(mu) && mu.length === 0) || (typeof mu === 'string' && mu.trim() === '')) {
+    try {
+      const { createMockups } = await import('../services/framemock.js');
+      const { frameMockUrl, frameMockApiKey } = (await import('../config/env.js')).env;
+      if (!frameMockUrl) {
+        console.error('publish: Missing env.frameMockUrl');
+      }
+      if (!frameMockApiKey) {
+        console.warn('publish: Missing env.frameMockApiKey - requests may fail if auth is required');
+      }
+      if (art.image_url) {
+        console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
+        const { frameUrl1, frameUrl2, frameUrl3, defaultOrientation } = (await import('../config/env.js')).env;
+        const generated = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation: defaultOrientation || 'horizontal',
+          enableInnerShadow: true
+        });
+        console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });
+        await db('artwork').where({ id: artworkId }).update({ mockup_urls: JSON.stringify(generated) });
+        mu = generated;
+      } else {
+        console.error('publish: No image_url, cannot generate mockups', { artworkId });
+      }
+    } catch (err) {
+      console.error('publish: Mockup generation failed', { artworkId, error: err });
+    }
+  }
+
+  // Build images array (painting first, then staged mockups)
+  if (Array.isArray(mu)) {
+    mockups = mu.filter((u) => typeof u === 'string' && u);
+  } else if (typeof mu === 'string') {
+    try {
+      const parsed = JSON.parse(mu);
+      if (Array.isArray(parsed)) {
+        mockups = parsed.filter((u) => typeof u === 'string' && u);
+      }
+    } catch (_) {
+      // Ignore parse errors — we can still publish with just the painting image
+    }
+  }
+
+  // Ensure painting image exists
+  if (!art.image_url) {
+    throw new Error('No painting image (art.image_url) available to publish');
+  }
+
+  // Deduplicate and attach alt text. First is painting, others are mockups.
+  const seen = new Set();
+  const images = [];
+  const pushImg = (src, alt) => {
+    if (!src || typeof src !== 'string') return;
+    if (seen.has(src)) return;
+    seen.add(src);
+    images.push({ src, alt });
+  };
+  pushImg(art.image_url, `Painting – ${title}`);
+  for (const u of mockups) pushImg(u, `Mockup – ${title}`);
+
+  if (images.length === 0) {
+    throw new Error('No images available to publish');
+  }
+
+  // Metafields: include geo JSON plus a couple of descriptive fields
+  const metafields = [
+    {
+      namespace: 'location',
+      key: 'geo',
+      type: 'json',
+      value: JSON.stringify({ lat: row.catchment_lat, lon: row.catchment_lon }),
+    },
+    {
+      namespace: 'location',
+      key: 'name',
+      type: 'single_line_text_field',
+      value: String(row.location_name || ''),
+    },
+    {
+      namespace: 'art',
+      key: 'series',
+      type: 'single_line_text_field',
+      value: 'Bomberg',
+    },
+  ];
+
+  // Optional tags for easier cataloging
+  const tags = [row.location_name, 'Bomberg', 'generated'].filter(Boolean);
+
+  // Build payload in n8n expected format
+  const payload = {
+    product: {
+      title,
+      body_html: bodyHtml,
+      options: [
+        { name: 'Format', values: ['Original Painting', 'Prints'] },
+        { name: 'Size', values: ['10 x 15cm', '20 x 30cm', '27 x 35cm', '33 x 43cm', '50 x 60cm'] }
+      ],
+      variants: [
+        { option1: 'Original Painting', option2: '20 x 30cm', price: '70.00' },
+        { option1: 'Original Painting', option2: '27 x 35cm', price: '90.00' },
+        { option1: 'Original Painting', option2: '33 x 43cm', price: '140.00' },
+        { option1: 'Original Painting', option2: '50 x 60cm', price: '190.00' },
+        { option1: 'Prints', option2: '10 x 15cm', price: '6.00' },
+        { option1: 'Prints', option2: '20 x 30cm', price: '9.00' },
+        { option1: 'Prints', option2: '27 x 35cm', price: '15.00' },
+        { option1: 'Prints', option2: '33 x 43cm', price: '35.00' }
+      ],
+      images: [
+        { src: art.image_url },
+        ...(mockups[0] ? [{ src: mockups[0] }] : []),
+        ...(mockups[1] ? [{ src: mockups[1] }] : []),
+        ...(mockups[2] ? [{ src: mockups[2] }] : []),
+        { src: "https://res.cloudinary.com/dyvp677di/image/upload/w_900/v1747827728/canvas_back_hfrqy8.png" }
+      ]
+    },
+    location_title: row.location_name || '',
+    google_id: '', // not present in schema
+    country: '',   // not in schema
+    state: '',     // not in schema
+    city: '',      // not in schema
+    formatted_address: row.formatted_address || '',
+    latitude: row.latitude ?? '',
+    longitude: row.longitude ?? '',
+    location_category: row.location_category || '',
+    location_description: row.location_description || '',
+    location_photo: row.image_source || '', // from schema
+    style_name: '',
+    uuid: String(artworkId),
+    featured: art.featured || ''
+  };
+
+  try {
+    await sendProduct(payload);
+  } catch (err) {
+    console.error('publish: sendProduct to n8n failed', { artworkId, err });
+    throw err;
+  }
+
+  // Mark as published/idempotent once webhook has been successfully sent
+  await db('artwork')
+    .where({ id: artworkId })
+    .update({ published: true });
+}
+
+================
+File: app/index.js
+================
+import express from 'express';
+import db from './db/client.js';
+import { env } from './config/env.js';
+import { qCatchment } from './queue/queues.js';
+import { qArtwork } from './queue/queues.js';
+import { qPublish } from './queue/queues.js';
+import { uploadImage } from './services/cloudinary.js';
+import './queue/workers.js'; // spin up processors
+import { randomUUID } from 'crypto';
+
+console.log('REDIS_URL present?', Boolean(process.env.REDIS_URL));
+// Ensure DB column for second-stage moderation exists (safe on repeated runs)
+(async () => {
+  try {
+    await db.raw('ALTER TABLE IF EXISTS artwork ADD COLUMN IF NOT EXISTS approved_for_publish boolean;');
+    await db.raw('ALTER TABLE IF EXISTS artwork ADD COLUMN IF NOT EXISTS moderated_at timestamptz;');
+    console.log('[startup] ensured artwork.approved_for_publish and artwork.moderated_at columns');
+  } catch (e) {
+    console.warn('[startup] failed to ensure artwork.approved_for_publish column:', e?.message || e);
+  }
+})();
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.json({ limit: '1mb' }));
+
+// ---------- Basic structured request logging ----------
+app.use((req, res, next) => {
+  const start = Date.now();
+  const requestId = randomUUID();
+  req.requestId = requestId;
+  req.log = (data = {}) => {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        requestId,
+        method: req.method,
+        path: req.path,
+        ...data,
+      }));
+    } catch (_) {
+      // best-effort logging
+    }
+  };
+  req.log({ event: 'request_start' });
+  res.on('finish', () => {
+    req.log({ event: 'request_end', status: res.statusCode, duration_ms: Date.now() - start });
+  });
+  next();
+});
+
+// ---------- Moderation UI ----------
+app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Photos</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Photos</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await json('/admin/photos?catchmentId=${catchmentId}');
+  grid.innerHTML = '';
+  for(const p of data.photos){
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = \`
+      <img class="img" src="\${p.src_url}" alt=""/>
+      <div class="meta">
+        <div class="small muted">\${p.ov_title || ''} \${p.ov_creator ? '— ' + p.ov_creator : ''}</div>
+        <div class="small muted">\${p.ov_license || ''} \${p.ov_license_version || ''}</div>
+        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false}</div></div>
+        <div class="row">
+          <button data-act="approve" data-id="\${p.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
+        </div>
+      </div>\`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button');
+  if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Artwork Moderation UI ----------
+app.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
+  const { catchmentId } = req.params;
+  try {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moderate Artwork</title>
+<style>
+  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  h1{font-size:18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
+  .img{width:100%;height:220px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
+  .reject{background:#ef4444}
+  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
+  .muted{color:#9aa4b2}
+</style>
+<div class="wrap">
+  <h1>Moderate Artwork</h1>
+  <div class="muted">Catchment: ${catchmentId}</div>
+  <div style="max-width:420px;margin:10px 0">
+    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
+  </div>
+  <div id="grid" class="grid"></div>
+</div>
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const grid = document.getElementById('grid');
+async function j(u, opt){ const r = await fetch(u, opt); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function load(){
+  const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
+  grid.innerHTML='';
+  for(const a of data.artworks){
+    const card=document.createElement('div'); card.className='card';
+    const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
+    card.innerHTML = \`
+      <img class="img" src="\${mock||a.image_url}" alt=""/>
+      <div class="meta">
+        <div class="row"><div>\${a.location_name||''}</div></div>
+        <div class="row">
+          <button data-act="approve" data-id="\${a.id}">Approve</button>
+          <button class="reject" data-act="reject" data-id="\${a.id}">Reject</button>
+        </div>
+      </div>\`;
+    grid.appendChild(card);
+  }
+}
+
+grid.addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button'); if(!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  try{
+    await fetch('/moderate/artwork/'+id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
+    await load();
+  }catch(e){ alert(e.message); }
+});
+
+load();
+</script>
+</html>`);
+  } catch (err) { next(err); }
+});
+
+// JSON for moderation grid
+app.get('/admin/photos', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
+      .where('l.catchment_id', catchmentId)
+      .orderBy('p.created_at','desc');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({ photos: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// List artworks for moderation (pending by default)
+app.get('/admin/artworks', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId, status = 'pending' } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('artwork as a')
+      .join('photos as p', 'p.id', 'a.photo_id')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
+        'p.id as photo_id','l.name as location_name'
+      )
+      .where('l.catchment_id', catchmentId)
+      .modify(qb => {
+        if (status === 'pending') {
+          qb.where('a.published', false)
+            .andWhere(inner => {
+              inner.where('a.approved_for_publish', false).orWhereNull('a.approved_for_publish');
+            });
+        }
+        if (status === 'approved') qb.where('a.approved_for_publish', true);
+        if (status === 'rejected') qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
+      })
+      .orderBy('a.id','desc')
+      .limit(200);
+    if (typeof req.log === 'function') req.log({ event: 'admin_artworks', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    res.json({ artworks: rows });
+  } catch (err) { next(err); }
+});
+
+// Approve/Reject photo
+app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const action = (req.body?.action || '').toString();
+  const t0 = Date.now();
+  let uploadedToCloudinary = false;
+  let enqueuedArtwork = false;
+  try {
+    const photo = await db('photos').where({ id }).first();
+    if (!photo) return res.status(404).json({ error: 'not_found' });
+
+    if (action === 'reject') {
+      await db('photos').where({ id }).update({ kept: false, processed: true });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      }
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
+
+    // Approve: mark kept, ensure upload, then enqueue artwork
+    await db('photos').where({ id }).update({ kept: true });
+
+    if (!photo.cloudinary_id || !photo.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photo.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photo.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+      uploadedToCloudinary = true;
+    }
+
+    await db('photos').where({ id }).update({ processed: true });
+    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
+    enqueuedArtwork = true;
+    if (typeof req.log === 'function') {
+      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+    }
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Moderate generated artwork (approve => enqueue publish, reject => mark only)
+app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const { action } = req.body || {};
+  const t0 = Date.now();
+  try {
+    if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
+
+    if (action === 'reject') {
+      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
+    await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
+    if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'approve', enqueuedPublish: true, duration_ms: Date.now() - t0 });
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) { next(err); }
+});
+
+
+// ---------- Operator UI (no build step) ----------
+app.get('/', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html>
+  <html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Art Factory · Operator</title>
+  <style>
+    :root { --bg:#0b0d11; --panel:#151922; --text:#e7ecf3; --muted:#9aa4b2; --acc:#6aa4ff; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; }
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+    .wrap{max-width:980px;margin:40px auto;padding:0 16px}
+    h1{font-size:20px;margin:0 0 12px}
+    .row{display:flex;gap:16px;align-items:stretch}
+    .col{flex:1;background:var(--panel);border:1px solid #202636;border-radius:12px;padding:16px}
+    label{display:block;font-weight:600;margin:10px 0 6px}
+    input,textarea{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:var(--text);padding:10px}
+    button{background:var(--acc);border:0;border-radius:8px;color:#fff;padding:10px 14px;font-weight:600;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{padding:8px;border-bottom:1px solid #273044}
+    th{color:var(--muted);text-align:left;font-weight:600}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+    .ok{background:#12361f;color:#7be49d}
+    .warn{background:#3a2a13;color:#ffd99a}
+    .err{background:#3a1717;color:#ff9c9c}
+    .muted{color:var(--muted)}
+    .small{font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px}
+    .kpi{background:#0f1320;border:1px solid #1f2839;border-radius:10px;padding:10px;text-align:center}
+    .kpi b{display:block;font-size:18px}
+    .bar{height:8px;background:#0f1320;border:1px solid #1f2839;border-radius:999px;overflow:hidden}
+    .bar > i{display:block;height:100%;width:0%}
+    .bar.photos > i{background:#6aa4ff}
+    .bar.art > i{background:#22c55e}
+    .bar.pub > i{background:#f59e0b}
+  </style>
+  <div class="wrap">
+    <h1>Art Factory · Operator</h1>
+    <div class="row">
+      <div class="col" style="max-width:420px">
+        <div class="small muted" id="envHint"></div>
+        <label>API Key (x-api-key)</label>
+        <input id="apiKey" placeholder="optional if INGEST_KEY unset"/>
+        <label>Name</label>
+        <input id="name" placeholder="Lisbon"/>
+        <div class="row" style="gap:8px">
+          <div style="flex:1">
+            <label>Lat</label>
+            <input id="lat" placeholder="38.7223"/>
+          </div>
+          <div style="flex:1">
+            <label>Lon</label>
+            <input id="lon" placeholder="-9.1393"/>
+          </div>
+        </div>
+        <label>Intro (optional)</label>
+        <textarea id="intro" rows="3" placeholder="A sunlit city of tiles and hills." ></textarea>
+        <label>Image Source</label>
+        <select id="imageSource" style="width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:10px;margin-bottom:8px">
+          <option value="google" selected>Google</option>
+          <option value="openverse">Openverse</option>
+        </select>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button id="kick">Create Catchment</button>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+        <div id="msg" class="small" style="margin-top:8px"></div>
+      </div>
+      <div class="col">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="small muted">Recent</div>
+          <div class="small muted" id="lastUpdated"></div>
+        </div>
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Locations</th>
+              <th>Photos (kept/total)</th>
+              <th>Artwork</th>
+              <th>Published</th>
+              <th>Progress</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script>
+    const $ = s => document.querySelector(s);
+    const apiKeyInput = $('#apiKey');
+    const nameInput = $('#name');
+    const latInput = $('#lat');
+    const lonInput = $('#lon');
+    const introInput = $('#intro');
+    const msg = $('#msg');
+    const tblBody = document.querySelector('#tbl tbody');
+    const lastUpdated = $('#lastUpdated');
+    const envHint = $('#envHint');
+
+    async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+
+    function renderRows(rows){
+      tblBody.innerHTML = '';
+      for(const row of rows){
+        const photosTotal = Number(row.photos_total)||0;
+        const photosKept = Number(row.photos_kept)||0;
+        const artworks = Number(row.artworks)||0;
+        const published = Number(row.published)||0;
+        const pPhotos = photosTotal>0 ? Math.round((photosKept/photosTotal)*100) : 0;
+        const pArt = photosKept>0 ? Math.round((artworks/Math.max(photosKept,1))*100) : 0;
+        const pPub = artworks>0 ? Math.round((published/Math.max(artworks,1))*100) : 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = \`
+          <td><b>\${row.name}</b><div class="small muted">\${new Date(row.created_at).toLocaleString()}</div></td>
+          <td>\${row.locations}</td>
+          <td>\${photosKept}/\${photosTotal}</td>
+          <td>\${artworks}</td>
+          <td>\${published}</td>
+          <td>
+            <div class="small muted">Photos</div>
+            <div class="bar photos"><i style="width:\${pPhotos}%"></i></div>
+            <div class="small muted" style="margin-top:6px">Artwork</div>
+            <div class="bar art"><i style="width:\${pArt}%"></i></div>
+            <div class="small muted" style="margin-top:6px">Publish</div>
+            <div class="bar pub"><i style="width:\${pPub}%"></i></div>
+          </td>
+          <td>
+            <a href="/admin/moderate/\${row.id}" target="_blank">Moderate</a>
+            &nbsp;
+            <a href="/admin/moderate-artwork/\${row.id}" target="_blank">Moderate Artwork</a>
+            &nbsp;
+            <button data-requeue="\${row.id}">Requeue</button>
+          </td>\`;
+        tblBody.appendChild(tr);
+      }
+      lastUpdated.textContent = new Date().toLocaleTimeString();
+    }
+
+    async function load(){
+      try{
+        const data = await json('/admin/recent');
+        envHint.textContent = 'REDIS_URL: ' + (data.redisPresent ? 'set' : 'missing') + ' · DB: ' + (data.dbOk ? 'ok' : 'err');
+        renderRows(data.rows);
+      }catch(e){ msg.textContent = 'Load failed: ' + e.message; }
+    }
+
+    // Realtime updates via SSE
+    try {
+      const es = new EventSource('/events');
+      es.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if(payload && payload.type === 'recent'){
+            renderRows(payload.rows || []);
+          }
+        } catch {}
+      };
+      es.onerror = () => { /* fallback to polling if needed */ };
+    } catch {}
+
+    document.addEventListener('click', async (ev)=>{
+      const id = ev.target?.dataset?.requeue;
+      if(!id) return;
+      ev.target.disabled = true;
+      try{
+        const r = await fetch('/requeue/catchment/' + id, { method:'POST', headers:{ 'x-api-key': apiKeyInput.value || '' } });
+        if(!r.ok) throw new Error(await r.text());
+        await load();
+      }catch(e){ alert('Requeue failed: ' + e.message); }
+      finally{ ev.target.disabled = false; }
+    });
+
+    $('#kick').addEventListener('click', async ()=>{
+      msg.textContent = '';
+      try{
+        const body = {
+          name: nameInput.value.trim(),
+          lat: Number(latInput.value),
+          lon: Number(lonInput.value),
+          intro: introInput.value.trim() || undefined,
+          imageSource: document.getElementById('imageSource').value
+        };
+        const r = await fetch('/catchments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKeyInput.value || '' },
+          body: JSON.stringify(body)
+        });
+        if(!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        msg.textContent = 'Queued catchment ' + j.id;
+        nameInput.value = latInput.value = lonInput.value = introInput.value = '';
+        await load();
+      }catch(e){ msg.textContent = 'Submit failed: ' + e.message; }
+    });
+
+    $('#refresh').addEventListener('click', load);
+    load();
+  </script>
+  </html>`);
+});
+
+// ---------- Server-Sent Events (SSE) for realtime operator updates ----------
+app.get('/events', async (req, res, next) => {
+  try {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const send = (payload) => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } catch (_) {
+        // ignore
+      }
+    };
+
+    // Immediately push a snapshot
+    const snapshot = await db
+      .select(
+        'c.id', 'c.name', 'c.created_at',
+        db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+        db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+        db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+      )
+      .from({ c: 'catchments' })
+      .orderBy('c.created_at', 'desc')
+      .limit(20);
+    send({ type: 'recent', rows: snapshot });
+
+    // Stream periodic updates
+    const intervalMs = 2000;
+    const iv = setInterval(async () => {
+      try {
+        const rows = await db
+          .select(
+            'c.id', 'c.name', 'c.created_at',
+            db.raw(`(select count(*) from locations l where l.catchment_id = c.id) as locations`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id) as photos_total`),
+            db.raw(`(select count(*) from photos p join locations l on l.id = p.location_id where l.catchment_id = c.id and p.kept) as photos_kept`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id) as artworks`),
+            db.raw(`(select count(*) from artwork a join photos p on p.id = a.photo_id join locations l on l.id = p.location_id where l.catchment_id = c.id and a.published) as published`)
+          )
+          .from({ c: 'catchments' })
+          .orderBy('c.created_at', 'desc')
+          .limit(20);
+        send({ type: 'recent', rows });
+      } catch (e) {
+        // best-effort
+      }
+    }, intervalMs);
+
+    req.on('close', () => {
+      clearInterval(iv);
+      try { res.end(); } catch {}
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+ 
+// ---------- Minimal, dependency-free rate limiter ----------
+const RATE_WINDOW_MS = 60_000; // 1 minute
+const RATE_MAX = 60; // requests per window per IP
+const rateMap = new Map(); // ip -> { count, reset }
+
+function rateLimit(req, res, next) {
+  const now = Date.now();
+  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  let entry = rateMap.get(ip);
+  if (!entry || now > entry.reset) {
+    entry = { count: 0, reset: now + RATE_WINDOW_MS };
+    rateMap.set(ip, entry);
+  }
+  entry.count += 1;
+  const remaining = Math.max(RATE_MAX - entry.count, 0);
+  res.setHeader('X-RateLimit-Remaining', String(remaining));
+  res.setHeader('X-RateLimit-Reset', String(Math.floor(entry.reset / 1000)));
+  if (entry.count > RATE_MAX) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'rate_limited', ip, count: entry.count, window_ms: RATE_WINDOW_MS });
+    }
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+  next();
+}
+
+// ---------- Optional API key auth for write endpoints ----------
+function requireApiKey(req, res, next) {
+  const expected = env.ingestKey; // set to enable
+  if (!expected) return next();
+  const provided = req.headers['x-api-key'] || req.headers['x-ingest-key'];
+  if (provided !== expected) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'auth_failed' });
+    }
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+// ---------- Health ----------
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// ---------- Helpers ----------
+function toNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function validateCatchmentBody(body) {
+  const errors = [];
+  const name = (body?.name ?? '').toString().trim();
+  const lat = toNumber(body?.lat);
+  const lon = toNumber(body?.lon);
+  const intro = body?.intro ? body.intro.toString().trim() : null;
+
+  if (!name) errors.push('name is required');
+  if (!Number.isFinite(lat)) errors.push('lat must be a number');
+  if (!Number.isFinite(lon)) errors.push('lon must be a number');
+  if (Number.isFinite(lat) && (lat < -90 || lat > 90)) errors.push('lat out of range');
+  if (Number.isFinite(lon) && (lon < -180 || lon > 180)) errors.push('lon out of range');
+
+  return { valid: errors.length === 0, errors, name, lat, lon, intro };
+}
+
+// ---------- Ingest: create a catchment and kick off the pipeline ----------
+app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
+  try {
+    const t0 = Date.now();
+    const { valid, errors, name, lat, lon, intro } = validateCatchmentBody(req.body);
+    if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
+
+    const image_source = ['google', 'openverse'].includes(req.body?.imageSource)
+      ? req.body.imageSource
+      : 'google';
+
+    const insert = await db('catchments')
+      .insert({ name, lat, lon, intro, image_source })
+      .returning(['id']);
+    const id = insert?.[0]?.id;
+    if (!id) throw new Error('Failed to create catchment');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_inserted', catchmentId: id });
+    }
+    // Enqueue stage 1 explicitly (idempotent jobId)
+    await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+    }
+    return res.status(202).json({ id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
+  const { stage, id } = req.params;
+  switch (stage) {
+    case 'catchment':
+      await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'requeue', stage: 'catchment', id, jobId: `catchment:${id}` });
+      }
+      break;
+    default:
+      return res.status(400).send('bad stage');
+  }
+  res.send('queued');
+});
+
+// ---------- Admin data for UI ----------
+app.get('/admin/recent', async (_req, res, next) => {
+  try {
+    const t0 = Date.now();
+    // last 20 catchments with rollup counts
+    const rows = await db
+      .select(
+        'c.id', 'c.name', 'c.created_at',
+        db.raw(`(
+          select count(*) from locations l
+          where l.catchment_id = c.id
+        ) as locations`),
+        db.raw(`(
+          select count(*) from photos p
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id
+        ) as photos_total`),
+        db.raw(`(
+          select count(*) from photos p
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and p.kept
+        ) as photos_kept`),
+        db.raw(`(
+          select count(*) from artwork a
+          join photos p on p.id = a.photo_id
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id
+        ) as artworks`),
+        db.raw(`(
+          select count(*) from artwork a
+          join photos p on p.id = a.photo_id
+          join locations l on l.id = p.location_id
+          where l.catchment_id = c.id and a.published
+        ) as published`)
+      )
+      .from({ c: 'catchments' })
+      .orderBy('c.created_at', 'desc')
+      .limit(20);
+
+    if (typeof _req.log === 'function') {
+      _req.log({ event: 'admin_recent', count: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({
+      rows,
+      redisPresent: Boolean(process.env.REDIS_URL),
+      dbOk: true
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+app.use('/admin/style-prompts', (await import('./server/routes/admin/stylePrompts.js')).default);
+app.use('/', (await import('./server/routes/admin/stylePromptsUI.js')).default);
+
+// ---------- Error handling ----------
+// 404
+app.use((_req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+// 500
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  try {
+    const payload = {
+      ts: new Date().toISOString(),
+      event: 'unhandled_error',
+      requestId: req?.requestId,
+      name: err?.name,
+      message: err?.message,
+      stack: err?.stack,
+    };
+    console.error(JSON.stringify(payload));
+  } catch (_) {
+    // best-effort
+    console.error('Unhandled error', err);
+  }
+  res.status(500).json({ error: 'internal_error' });
+});
+
+// ---------- Startup ----------
+const PORT = env.port || 3000;
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), event: 'app_listening', host: HOST, port: PORT, moderationEnabled: Boolean(process.env.MODERATION_ENABLED), redisPresent: Boolean(process.env.REDIS_URL) }));
+});
+
+export default app;
+
+================
+File: .gitignore
+================
+# dependencies
+node_modules/
+
+# env & secrets
+.env
+.env.*
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+.env
+
+================
+File: .render.yaml
+================
+services:
+  - type: web
+    name: art-factory
+    runtime: node
+    plan: free
+    repo: https://github.com/jakehasgithubnow/art-factory
+    buildCommand: "npm ci || npm install"
+    startCommand: "node app/index.js"
+    postDeploy: "npm run migrate"
+    envVars:
+      - fromGroup: art-factory-env
+      - key: DATABASE_URL
+        fromDatabase:
+          name: art-factory-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: art-factory-redis
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+
+databases:
+  - name: art-factory-db
+    databaseName: artfactory
+    user: artfactory
+    plan: starter
+
+redis:
+  - name: art-factory-redis
+    plan: developer
+
+envVarGroups:
+  - name: art-factory-env
+    envVars:
+      - key: OPENAI_API_KEY
+      - key: GOOGLE_API_KEY
+      - key: GOOGLE_CSE_ID
+      - key: CLOUDINARY_CLOUD_NAME
+      - key: CLOUDINARY_API_KEY
+      - key: CLOUDINARY_API_SECRET
+      - key: FRAME_MOCK_URL
+      - key: SHOPIFY_SHOP
+      - key: SHOPIFY_ACCESS_TOKEN
+      - key: PAINT_ENDPOINT
+      - key: INGEST_KEY
+      - key: SHOPIFY_API_VERSION
+
+================
+File: package.json
+================
+{
+  "name": "art-factory",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "app/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "dotenv -e .env node app/index.js",
+    "start": "node app/index.js",
+    "migrate": "node scripts/migrate.js"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "body-parser": "^2.2.0",
+    "bullmq": "^4.12.1",
+    "cloudinary": "^2.0.0",
+    "dotenv": "^16.4.1",
+    "dotenv-cli": "^8.0.0",
+    "express": "^4.19.2",
+    "ioredis": "^5.3.2",
+    "knex": "^3.1.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.25.0",
+    "pg": "^8.11.5"
+  }
+}
+
+================
+File: README.md
+================
+# Art-factory Application Overview
+
+This document explains what the Art-factory application does and how to run it.
+
+## What the App Does
+
+The Art-factory application is an automated system designed to generate and publish artwork based on geographical "catchments". It processes data through a multi-stage pipeline, leveraging a PostgreSQL database, a BullMQ job queue, and integrations with various external services like OpenAI (for content generation), Google (potentially for location data or imagery), Cloudinary (for image management), and Shopify (for e-commerce publishing).
+
+**Core Functionality:**
+
+1.  **Catchment Ingestion**: Defines a geographical area (a "catchment") via an HTTP POST request to the `/catchments` endpoint. This data (name, latitude, longitude, intro) is stored in a PostgreSQL database.
+2.  **Automated Pipeline Triggering**: Upon insertion of new data into the `catchments`, `locations`, `photos`, or `artwork` tables, a PostgreSQL `pg_notify` event is triggered.
+3.  **Watcher Service**: The `app/db/watchers.js` service listens for these database notifications. When an event occurs, it adds a corresponding job to a BullMQ queue (e.g., `qCatchment`, `qPhoto`, `qArtwork`, `qPublish`).
+4.  **Asynchronous Processing Workflows**:
+    *   **Catchment Processing (`app/workflows/catchment.js`)**: Processes the initial catchment job, likely identifying and inserting `locations` within that catchment.
+    *   **Location to Photo Processing (`app/workflows/photos.js`)**: When a `location` is inserted, a `photo` job is enqueued. The `photo` worker then processes this, finding or generating images related to the location and storing them as `photos`.
+    *   **Photo to Artwork Generation (`app/workflows/artwork.js`)**: When a `photo` is inserted, an `artwork` job is enqueued. The `artwork` worker transforms the photo into a piece of `artwork`, potentially using OpenAI for descriptions/styles and Framemock for mockups. Cloudinary is used for image hosting.
+    *   **Artwork Publishing (`app/workflows/publish.js`)**: When `artwork` is inserted, a `publish` job is enqueued. The `publish` worker takes the generated artwork and publishes it to Shopify.
+5.  **Manual Re-queueing**: An `/requeue/:stage/:id` endpoint allows for manual re-triggering of specific stages of the pipeline.
+
+In essence, the application automates the entire process from defining a geographical area to generating unique artwork inspired by it and listing it for sale online.
+
+## How to Run the App
+
+1.  **Prerequisites**:
+    *   Node.js (>=18.0.0)
+    *   PostgreSQL database
+    *   Redis instance
+    *   Docker Desktop (recommended for local PostgreSQL/Redis setup)
+    *   `.env` file configured with your API keys.
+
+2.  **Docker Setup (for PostgreSQL and Redis)**:
+    ```bash
+    # Start PostgreSQL
+    docker run --name art-factory-postgres -e POSTGRES_USER=artfactory -e POSTGRES_PASSWORD=artfactory -e POSTGRES_DB=artfactory -p 5433:5432 -v art-factory-pgdata:/var/lib/postgresql/data -d postgres:16
+
+    # Start Redis
+    docker run --name art-factory-redis -p 6379:6379 -d redis/redis-stack-server:latest
+    ```
+
+    **Troubleshooting PostgreSQL Docker Setup:**
+    If you encounter issues with the `artfactory` user not existing or connection refused errors, it might indicate a problem with the Docker PostgreSQL container's initialization or persistence. In such cases, consider:
+    *   Ensuring your Docker Desktop application is fully running and healthy.
+    *   Stopping and removing the container and its associated volume for a clean restart:
+        ```bash
+        docker stop art-factory-postgres && docker rm art-factory-postgres && docker volume rm art-factory-pgdata
+        ```
+        Then re-run the `docker run` command for PostgreSQL.
+    *   Alternatively, consider installing PostgreSQL directly on your operating system or using a cloud-hosted PostgreSQL database. If using a different setup, ensure the connection details in your `.env` file (`DATABASE_URL`) are correct and that the `artfactory` user and database are properly created.
+
+3.  **Environment Variables (`.env` file content)**:
+    Create a `.env` file in the root of the project with the following content, replacing the placeholder values with your actual API keys:
+    ```
+    # OpenAI
+    OPENAI_API_KEY=...
+
+    # Google Custom Search
+    GOOGLE_API_KEY=...
+    GOOGLE_CSE_ID=...
+
+    # Cloudinary
+    CLOUDINARY_CLOUD_NAME=...
+    CLOUDINARY_API_KEY=...
+    CLOUDINARY_API_SECRET=...
+
+    # Frame mock-up service
+    FRAME_MOCK_URL=...
+
+    # Paint-API (PiAPI) — for generating the AI paintings
+    PAINT_API_URL=...
+    PAINT_API_KEY=...
+
+    # Shopify
+    SHOPIFY_SHOP=...
+
+    # Database (Postgres)
+    DATABASE_URL="REDACTED"
+    REDIS_URL="redis://localhost:6379"
+
+    # Optional: custom port (defaults to 3000)
+    PORT=3003
+    ```
+
+4.  **Install Dependencies**:
+    ```bash
+    pnpm install
+    ```
+
+5.  **Run Database Migrations**:
+    ```bash
+    npm run migrate
+    ```
+
+6.  **Start the Application**:
+    ```bash
+    npm run dev
+    ```
+
+7.  **Initiate First Task (Create Catchment)**:
+    ```bash
+    curl -X POST -H "Content-Type: application/json" -d '{
+      "name": "Dublin City Centre",
+      "lat": 53.3498,
+      "lon": -6.2603,
+      "intro": "A vibrant area in the heart of Dublin, known for its historical buildings and lively atmosphere."
+    }' http://localhost:3003/catchments
+
+================
+File: ReadMe.txt
+================
+Art Factory
+
+A production-ready pipeline for turning real-world locations into curated “paintings,” reviewing them in lightweight admin UIs, and publishing approved pieces to external storefronts and automations.
+
+This README is your single source of truth. It explains how the app is wired end-to-end, how each subsystem interacts, which environment variables you need, how jobs move through the pipeline, and what the admin UIs and APIs do.
+
+⸻
+
+Table of contents
+	•	What this app does (the big picture)
+	•	Architecture at a glance
+	•	Runtime components
+	•	Directory map
+	•	Configuration & environment
+	•	Data model
+	•	Queues & workers
+	•	Workflow stages
+	•	APIs & Admin UIs
+	•	Services (integrations)
+	•	Operational behavior
+	•	Local development
+	•	Deployment
+	•	Troubleshooting & observability
+	•	Extending the system
+	•	Security considerations
+	•	Known gaps & TODOs
+
+⸻
+
+What this app does (the big picture)
+	1.	Ingest a “catchment” (a geographic area with a name and centroid).
+	2.	Discover & enrich locations inside that catchment (e.g., via Google Places).
+	3.	Collect photos (via Google CSE or Openverse) for each location.
+	4.	Moderate photos in a simple web UI; approving a photo uploads it to Cloudinary and enqueues artwork generation.
+	5.	Generate artwork (AI “painting”) and store it along with description and mockups.
+	6.	Moderate artwork in a second UI; approving artwork enqueues publish.
+	7.	Publish approved pieces to Shopify and/or trigger automations (n8n webhook).
+	8.	Monitor progress via a live Server-Sent Events feed and recent rollups.
+
+Everything is event-driven using BullMQ backed by Redis, with PostgreSQL as the system of record.
+
+⸻
+
+Architecture at a glance
+
+flowchart LR
+  subgraph Client/Admin
+    U1[Operator UI]
+    U2[Photo Moderation UI]
+    U3[Artwork Moderation UI]
+  end
+
+  subgraph API(Express API)
+    A1[/POST /catchments/]
+    A2[/GET /admin/photos/ .../artworks/]
+    A3[/POST /moderate/photo/:id/]
+    A4[/POST /moderate/artwork/:id/]
+    A5[/GET /events (SSE)/]
+    A6[/GET /admin/recent/]
+    A7[/GET/POST System + Style Prompts/]
+  end
+
+  subgraph Data
+    DB[(PostgreSQL)]
+    R[(Redis)]
+  end
+
+  subgraph Jobs(BullMQ)
+    Q1[q:catchment]
+    Q2[q:location]
+    Q3[q:photo]
+    Q4[q:artwork]
+    Q5[q:publish]
+  end
+
+  subgraph External
+    G[Google CSE & Places]
+    OV[Openverse]
+    CLD[Cloudinary]
+    FM[Frame-mock service]
+    OAI[OpenAI / PIAPI]
+    SH[Shopify]
+    N8N[n8n Webhook]
+  end
+
+  U1 --> A1
+  U2 --> A2 --> A3
+  U3 --> A2 --> A4
+  A1 --> DB
+  A1 --> Q1
+  A2 --> DB
+  A3 --> DB
+  A3 --> Q4
+  A4 --> DB
+  A4 --> Q5
+  A5 --> DB
+  A6 --> DB
+
+  Q1 <---> R
+  Q2 <---> R
+  Q3 <---> R
+  Q4 <---> R
+  Q5 <---> R
+
+  Q1 --> G
+  Q2 --> G
+  Q3 --> G & OV --> DB
+  Q3 --> CLD
+  Q4 --> OAI
+  Q4 --> FM
+  Q5 --> SH
+  Q5 --> N8N
+
+  Q1 --> DB
+  Q2 --> DB
+  Q3 --> DB
+  Q4 --> DB
+  Q5 --> DB
+
+
+⸻
+
+Runtime components
+	•	Express server (app/server/app.js)
+Exposes ingestion, moderation, health, SSE, and admin endpoints. Adds lightweight rate limiting and (optional) API key auth.
+	•	BullMQ queues & workers (app/queue/*.js)
+Five queues (catchment, location, photo, artwork, publish) share a Redis connection and uniform retry/backoff semantics. workers.js binds processors from app/workflows/*.
+	•	PostgreSQL (app/db/schema.sql)
+Holds catchments, locations, photos, artwork, and prompt configuration with indices and guardrails.
+	•	Redis
+Backing store for BullMQ queues and job state.
+	•	Integrations / services (app/services/*)
+Adapters for Cloudinary, Google, Openverse, OpenAI, frame-mock, Shopify, and n8n with consistent logging and retry behavior.
+
+⸻
+
+Directory map
+
+app/
+  config/env.js                # Env loading & typed helpers
+  db/
+    client.js                  # Knex client
+    schema.sql                 # Full DB schema & indices
+    migrations/                # One-off SQL migration(s)
+    stylePrompts.js            # DAL for style_prompts
+    systemPrompts.js           # DAL for system_prompts
+  queue/
+    queues.js                  # Queue factories (BullMQ)
+    workers.js                 # Worker wiring & structured logs
+  scripts/
+    migrate.js                 # Apply schema.sql to DB
+  server/
+    helpers/validation.js      # Input validation helpers
+    middleware/                # rateLimit & requireApiKey
+    routes/                    # APIs & lightweight admin UIs
+      admin/
+        stylePrompts.js        # REST API for style prompts
+        stylePromptsUI.js      # Simple HTML UI (system+style prompts)
+        systemPrompts.js       # REST API for system prompts
+      adminRecent.js           # Rollup snapshot for operator UI
+      catchments.js            # Ingest & requeue
+      events.js                # SSE stream of recent rollups
+      health.js
+      moderationArtwork.js     # Approve/reject artwork + mockups + publish enqueue
+      moderationArtworkUI.js   # HTML UI for artwork moderation
+      moderationPhotos.js      # Approve/reject photos + Cloudinary + artwork enqueue
+      moderationUI.js          # HTML UI for photo moderation
+    app.js                     # Express app factory + wiring + error handling
+  services/
+    artworkTracker.js          # In-memory processing guard (dedupe)
+    cloudinary.js              # Upload + metadata with retries
+    framemock.js               # Frame-mock client with retries & timeouts
+    google.js                  # Google CSE images + Places details
+    n8n.js                     # Outbound webhook
+    openai.js                  # Chat & JSON helpers (OpenAI/PIAPI)
+    openverse.js               # Openverse image search
+    shopify.js                 # Shopify Admin REST (partially shown)
+  workflows/
+    artwork.js                 # Processor: generate artwork (used by q:artwork)
+    catchment.js               # Processor: seed locations for a catchment
+    locations.js               # Processor: enrich locations
+    photos.js                  # Processor: source & score photos
+    publish.js                 # Processor: publish to Shopify & automations
+  index.js                     # (Entry point that boots server/workers)
+.render.yaml                   # (Render.com deploy config)
+package.json
+README.md (this file)
+
+Note: Some workflow and route files referenced by the app exist in the repo but were not fully included in the excerpt. This README documents their intended responsibilities and integration points based on how they are used.
+
+⸻
+
+Configuration & environment
+
+All configuration is centralized in app/config/env.js, which provides typed accessors:
+
+Required to boot
+	•	DATABASE_URL – PostgreSQL connection string (e.g., postgres://user:pass@host:5432/db)
+	•	REDIS_URL – Redis connection string (e.g., redis://:pass@host:6379/0)
+
+Server
+	•	PORT (default 3000)
+	•	INGEST_KEY – optional; when set, write endpoints require x-api-key/x-ingest-key headers
+
+OpenAI / PIAPI
+	•	OPENAI_API_KEY – for image/description generation in workflows
+	•	(Optional) PIAPI_API_KEY – referenced in services/openai.js (env aliasing supported there)
+
+Image search
+	•	Google CSE
+	•	GOOGLE_API_KEY
+	•	GOOGLE_CX  ← used by services/google.js
+	•	GOOGLE_CSE_ID  ← loaded in env.js as googleCseId (see Known gaps)
+	•	Openverse
+	•	OPENVERSE_API_KEY (optional; adds Authorization header)
+
+Google Places
+	•	GOOGLE_PLACES_API_KEY – for text search + place details
+
+Cloudinary
+	•	CLOUDINARY_CLOUD_NAME
+	•	CLOUDINARY_API_KEY
+	•	CLOUDINARY_API_SECRET
+
+Frame-mock (mockup generator)
+	•	FRAME_MOCK_URL – required to generate framed mockups
+	•	FRAME_MOCK_API_KEY – optional bearer token (if service requires auth)
+	•	frameUrl1, frameUrl2, frameUrl3 – optional default frame image URLs (note unusual lowercase names—see Known gaps)
+
+Paint service
+	•	PAINT_ENDPOINT – optionally used in artwork generation workflows
+
+Shopify
+	•	SHOPIFY_SHOP – shop domain or URL (e.g., myshop.myshopify.com)
+	•	SHOPIFY_ACCESS_TOKEN
+	•	SHOPIFY_API_VERSION (default 2024-04)
+
+Queues / workers
+	•	QUEUE_PREFIX (default art-factory)
+	•	QUEUE_ATTEMPTS (default 5)
+	•	QUEUE_BACKOFF_MS (default 1000)
+	•	QUEUE_REMOVE_ON_COMPLETE (default true)
+	•	QUEUE_REMOVE_ON_FAIL (default false)
+	•	Per-queue concurrency:
+	•	CONCURRENCY_CATCHMENT (default 3)
+	•	CONCURRENCY_LOCATION (default 3)
+	•	CONCURRENCY_PHOTO (default 4)
+	•	CONCURRENCY_ARTWORK (default 2)
+	•	CONCURRENCY_PUBLISH (default 2)
+
+⸻
+
+Data model
+
+Managed via app/db/schema.sql (applied by app/scripts/migrate.js). The schema is idempotent and guarded by indices/constraints:
+
+Tables
+	•	catchments
+	•	id uuid PK, name, lat, lon, intro?, shopify_id?, processed boolean default false, created_at
+	•	Indices & guards:
+	•	CHECK lat ∈ [-90,90], CHECK lon ∈ [-180,180]
+	•	Unique (lower(name), lat, lon) to prevent duplicates
+	•	Unique shopify_id when present
+	•	locations
+	•	id uuid PK, catchment_id FK, name, address?, category?, description?, search_term?
+	•	Google enrichment fields: g_place_id, g_*, g_photo_refs jsonb
+	•	Flags: processed boolean default false, created_at
+	•	Indices: locations_unique_place_per_catchment (catchment_id, lower(name)), idx_locations_catchment, idx_locations_created_at
+	•	photos
+	•	id uuid PK, location_id FK, src_url, kept boolean default false, score numeric CHECK 0..1, cloudinary_id?, secure_url?, processed boolean default false
+	•	Openverse metadata columns (license, creator, etc.)
+	•	Indices: unique (location_id, src_url), unique cloudinary_id when present, idx_photos_location, idx_photos_created_at
+	•	artwork
+	•	id uuid PK, photo_id FK, image_url, description?, mockup_urls jsonb default [], shopify_id?, published boolean default false, created_at
+	•	Indices: idx_artwork_photo, unique shopify_id when present, idx_artwork_created_at
+	•	system_prompts
+	•	id serial PK, key UNIQUE, text, enabled boolean default true, updated_at
+	•	Seeded entries for concise descriptions & locations copy
+	•	style_prompts
+	•	id serial PK, text, enabled boolean default true, created_at, updated_at
+	•	Index: idx_style_prompts_enabled
+
+Admin rollups query counts locations, photos_total, photos_kept, artworks, and published per catchment for dashboards and SSE.
+
+⸻
+
+Queues & workers
+
+Queues are created in app/queue/queues.js with shared IORedis connection and consistent defaults:
+	•	Default job options
+	•	Attempts: QUEUE_ATTEMPTS (exponential backoff, QUEUE_BACKOFF_MS)
+	•	Remove on complete/fail according to env
+	•	Namespaced with QUEUE_PREFIX (default: art-factory)
+	•	Queues
+	•	qCatchment, qLocation, qPhoto, qArtwork, qPublish
+	•	Workers (app/queue/workers.js)
+	•	Each queue is bound to a processor in app/workflows/*
+	•	Per-queue concurrency configurable via env
+	•	Emits structured JSON logs on lifecycle events (job_started, job_completed, job_failed, job_stalled, worker_error)
+	•	Idempotency
+	•	API enqueues with deterministic jobIds (e.g., catchment:<id>, artwork:<photoId>, publish:<artworkId>) to prevent duplicates.
+	•	services/artworkTracker.js provides an in-memory deduper for artwork processing (consider persistent store in HA setups).
+
+⸻
+
+Workflow stages
+
+The processors live in app/workflows/ (not fully shown, responsibilities inferred from routes & services).
+	1.	catchment
+Seed initial work for a catchment (e.g., expand to a list of candidate locations). May choose image provider (“google” vs “openverse”) based on the ingest request.
+	2.	locations
+For each candidate, enrich via services/google.getPlaceDetails(searchTerm) to populate address, website, geocoordinates, rating, and g_photo_refs.
+	3.	photos
+Source images via:
+	•	services/google.imageSearch(query, num) (Google CSE)
+	•	services/openverse.imageSearch(query, num) (Openverse)
+Attach Openverse metadata, dedupe by (location_id, src_url), assign score, and set processed flags.
+	4.	artwork
+Given an approved photo:
+	•	Upload to Cloudinary if needed (also done eagerly in moderation step).
+	•	Generate painting & description using services/openai.chat/chatJson and configured system/style prompts.
+	•	Persist artwork with image_url, description.
+	•	Optionally call services.framemock.createMockups(...) to pre-generate mockups.
+	5.	publish
+Push approved artwork to Shopify (services/shopify), set shopify_id, mark as published, and notify external automations via services/n8n.sendProduct(payload).
+
+⸻
+
+APIs & Admin UIs
+
+Health
+	•	GET /health → { ok: true, time: ISO8601 }
+
+Ingest & queue
+	•	POST /catchments
+Body:
+
+{
+  "name": "Lisbon, Baixa",
+  "lat": 38.711,
+  "lon": -9.139,
+  "intro": "Historic center by the Tagus",
+  "imageSource": "google" | "openverse"   // optional, default "google"
+}
+
+Behavior: Validates and inserts a catchment, then enqueues the catchment job (jobId=catchment:<id>).
+Auth: Requires x-api-key if INGEST_KEY is set.
+Rate limit: 60 req/min per IP.
+Response: 202 Accepted { "id": "<uuid>" }
+
+	•	POST /requeue/:stage/:id
+Currently supports stage=catchment to re-enqueue the initial job deterministically.
+
+Moderation – Photos
+	•	UI: GET /admin/moderate/:catchmentId
+Serves a minimal HTML grid (no framework) that calls the APIs below.
+	•	GET /admin/photos?catchmentId=<uuid>
+Returns all photos for a catchment with Openverse metadata.
+	•	POST /moderate/photo/:id
+Body: { "action": "approve" | "reject" }
+	•	On approve:
+	1.	photos.kept = true
+	2.	If not already uploaded, uploads src_url to Cloudinary (folder art-factory/source, public_id=source_<photo.id>) and saves cloudinary_id, secure_url
+	3.	Marks photos.processed = true
+	4.	Enqueues artwork job (jobId=artwork:<photoId>)
+	•	On reject: marks kept=false, processed=true
+Auth: Requires x-api-key if INGEST_KEY is set.
+
+Moderation – Artwork
+	•	UI: GET /admin/moderate-artwork/:catchmentId
+Displays pending pieces with Approve/Reject buttons.
+	•	GET /admin/artworks?catchmentId=<uuid>&status=pending|approved|rejected
+Lists artwork joined to photos & locations for a catchment, filtered by moderation status.
+	•	POST /moderate/artwork/:id
+Body: { "action": "approve" | "reject" }
+	•	On reject: marks as explicitly not approved for publish.
+	•	On approve:
+	1.	Marks as approved for publish
+	2.	Fetches artwork.image_url
+	3.	Calls frame-mock to generate staged mockups, updates artwork.mockup_urls
+	4.	Enqueues publish job (jobId=publish:<artworkId>)
+Auth: Requires x-api-key if INGEST_KEY is set.
+
+The moderation UIs are intentionally simple HTML+JS so operators can run them without any frontend build tooling.
+
+Operator data & live updates
+	•	GET /admin/recent
+Returns the last 20 catchments with rollup counts: locations, photos total/kept, artworks, published. Useful for dashboards.
+	•	GET /events (SSE)
+Streams the same rollup payload every 2 seconds, plus an immediate snapshot on connect. Use this to power “recent activity” dashboards without polling.
+
+Prompts admin
+	•	UI: GET /admin/style-prompts-ui
+Shows System Prompts and Style Prompts in one page; form submits update both.
+	•	System prompts (JSON)
+	•	GET /admin/system-prompts → { prompts: [...] }
+	•	PUT /admin/system-prompts/:key with { text, enabled }
+Upserts by key (e.g., location_intro_system, artwork_description_system, location_places_system).
+	•	Style prompts (JSON)
+	•	GET /admin/style-prompts → [{ id, text, enabled, ... }]
+	•	POST /admin/style-prompts → create
+	•	PATCH /admin/style-prompts/:id → update text
+	•	PATCH /admin/style-prompts/:id/toggle → { enabled: boolean }
+	•	DELETE /admin/style-prompts/:id
+
+⸻
+
+Services (integrations)
+
+All adapters prefer timeouts, retries, and structured logging.
+	•	Cloudinary (services/cloudinary.js)
+	•	uploadImage(image, { folder, publicId, overwrite, ... }) with exponential backoff on 429/5xx and network flakiness.
+	•	getImageMetadata(publicId) convenience for EXIF/context.
+	•	Returns { secure_url, public_id } (plus legacy { url, id }) to persist on photos.
+	•	Google (services/google.js)
+	•	imageSearch(query, num) uses Custom Search (GOOGLE_API_KEY + GOOGLE_CX).
+	•	getPlaceDetails(searchTerm) does text search → place details (GOOGLE_PLACES_API_KEY) to enrich locations.
+	•	Openverse (services/openverse.js)
+	•	imageSearch(query, num) returning results with license and attribution fields; maps neatly onto photos Openverse columns.
+	•	OpenAI/PIAPI (services/openai.js)
+	•	chat(system, user, temperature, model)
+	•	chatJson({ system, user, schema, temperature, model, maxRetries }) enforcing JSON structure with graceful retry on malformed output. Workflows use these for titles/descriptions and prompt-driven generation.
+	•	Frame-mock (services/framemock.js)
+	•	createMockups({ frameUrl1, frameUrl2, frameUrl3, artUrl, orientation, enableInnerShadow }, { timeoutMs })
+Posts JSON, handles timeouts/retries, returns an array of image URLs (imageUrl1..3). Used during artwork approval to generate staged product imagery.
+	•	Shopify (services/shopify.js)
+	•	Admin REST wrapper with auth headers, retry on 429/5xx. Used by publish stage to create products/variants/media, then persist artwork.shopify_id.
+	•	n8n (services/n8n.js)
+	•	sendProduct(payload) posts to a configured webhook (15s timeout). Use to fan-out events downstream (slack, email, sheets, etc.).
+
+⸻
+
+Operational behavior
+	•	Rate limiting (server/middleware/rateLimit.js)
+	•	60 requests/min per IP, windowed in memory.
+	•	Adds X-RateLimit-Remaining & X-RateLimit-Reset headers.
+	•	Note: in-memory (per process). For multi-instance deployments, use a shared limiter (e.g., Redis) or run the API behind a gateway.
+	•	Auth (server/middleware/requireApiKey.js)
+	•	If INGEST_KEY is set, write endpoints require x-api-key (or x-ingest-key) to match.
+	•	If not set, endpoints are open (dev-friendly).
+	•	Logging
+	•	Structured JSON logs across app/server, services, and workers, including timestamps, request IDs, queue/worker context, durations, and error stacks.
+	•	SSE
+	•	/events streams JSON payloads and cleans up on client disconnect.
+	•	Error handling
+	•	API returns 500 { error: "internal_error" } with error details logged.
+	•	Workers log failures with name/message/stack; BullMQ retried per config.
+
+⸻
+
+Local development
+
+Prerequisites
+	•	Node.js 18+ (ESM imports used)
+	•	PostgreSQL 14+
+	•	Redis 6+
+	•	Cloudinary / Google / OpenAI / Shopify credentials as needed for your scenario
+
+Install & configure
+
+# clone
+git clone <your-fork-url> art-factory && cd art-factory
+
+# install (pick your tool)
+pnpm install  # or: npm install / yarn
+
+Create .env with at least:
+
+DATABASE_URL=postgres://user:pass@localhost:5432/art_factory
+REDIS_URL=redis://localhost:6379/0
+
+# Optional, recommended for write protection in dev UIs
+INGEST_KEY=dev-secret
+
+# If you plan to fetch images via Google CSE
+GOOGLE_API_KEY=...
+GOOGLE_CX=...
+
+# If you plan to use Openverse
+OPENVERSE_API_KEY=...
+
+# Cloudinary (for uploading approved photos)
+CLOUDINARY_CLOUD_NAME=...
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+
+# OpenAI/PIAPI
+OPENAI_API_KEY=...
+
+# Frame mock (to produce staged mockups on artwork approval)
+FRAME_MOCK_URL=https://your-frame-mock.example.com/api/v1/mockups
+FRAME_MOCK_API_KEY=...
+
+# Shopify (for publish stage)
+SHOPIFY_SHOP=myshop.myshopify.com
+SHOPIFY_ACCESS_TOKEN=shpat_...
+SHOPIFY_API_VERSION=2024-04
+
+If you want test-only runs, you can omit many keys; the app boots with just DB + Redis. Workflows that require missing keys should handle it gracefully, but moderation-time actions will be limited.
+
+Initialize schema
+
+node app/scripts/migrate.js
+# => "Schema applied ✅"
+
+Run the app
+
+There’s an entrypoint at app/index.js that typically starts both server and workers.
+
+node app/index.js
+# Server listens on PORT (default 3000)
+# Workers attach to all queues with configured concurrency
+
+Visit:
+	•	Photo moderation UI: http://localhost:3000/admin/moderate/<catchmentId>
+	•	Artwork moderation UI: http://localhost:3000/admin/moderate-artwork/<catchmentId>
+	•	Prompts UI: http://localhost:3000/admin/style-prompts-ui
+	•	Live events (SSE): http://localhost:3000/events
+	•	Recent rollup: http://localhost:3000/admin/recent
+	•	Health: http://localhost:3000/health
+
+Ingest a catchment (example)
+
+curl -X POST http://localhost:3000/catchments \
+  -H 'Content-Type: application/json' \
+  -H 'x-api-key: dev-secret' \
+  -d '{
+    "name": "Lisbon - Baixa",
+    "lat": 38.711,
+    "lon": -9.139,
+    "intro": "Historic center by the Tagus",
+    "imageSource": "openverse"
+  }'
+# => { "id": "..." }
+
+Workers will take it from there. Use /admin/recent or /events to watch progress.
+
+⸻
+
+Troubleshooting & observability
+	•	Can’t connect to DB/Redis: verify DATABASE_URL / REDIS_URL and that services are reachable from your container/host.
+	•	429s or 5xx from 3rd parties: adapters in /services already retry with exponential backoff and log details (HTTP status, attempt, delays).
+	•	Jobs not progressing: check worker logs for job_failed events, and validate required env vars for that stage.
+	•	Moderation UI actions failing: if INGEST_KEY is set, ensure x-api-key is provided in the page’s input box before clicking Approve/Reject (the UI forwards it with the request).
+	•	SSE not updating: browser might buffer; ensure no proxies are buffering the stream and that the connection stays open.
+
+⸻
+
+Extending the system
+	•	Add a new image provider: implement services/myProvider.imageSearch(), then branch in the photos workflow based on imageSource.
+	•	Add new mockup styles: host new frameUrl* assets, pass them into framemock.createMockups() when approving artwork.
+	•	Publish to additional channels: extend workflows/publish.js to fan-out to more services and persist their IDs on artwork.
+	•	Richer prompts: add/edit system_prompts and style_prompts via the admin UI or APIs; workflows should read enabled prompts in order.
+
+⸻
+
+Security considerations
+	•	API key protection: set INGEST_KEY in all non-local environments so write endpoints can’t be abused.
+	•	Least privilege: use dedicated Shopify & Cloudinary keys with scoping.
+	•	PII & licensing: Openverse and Google results include license/creator metadata; the photo moderation UI surfaces these. Respect attribution and license terms downstream.
+	•	Webhooks: the n8n URL is currently hard-coded in services/n8n.js. Consider moving to env var and restricting inbound IPs on the n8n side.
+
+⸻
+
+Known gaps & TODOs
+
+These are code-level issues you should address early:
+	1.	Artwork moderation columns missing in schema
+Routes reference artwork.approved_for_publish and artwork.moderated_at, but schema.sql does not define them.
+Fix: add migration:
+
+ALTER TABLE artwork
+  ADD COLUMN IF NOT EXISTS approved_for_publish boolean,
+  ADD COLUMN IF NOT EXISTS moderated_at timestamptz;
+
+Update queries accordingly.
+
+	2.	Dropping unique on artwork.photo_id (migration mismatch)
+app/db/migrations/20250816_drop_artwork_photoid_unique.sql runs:
+
+ALTER TABLE artwork DROP CONSTRAINT artwork_unique_per_photo;
+
+But schema.sql creates a unique index named artwork_unique_per_photo, not a table constraint.
+Fix: use:
+
+DROP INDEX IF EXISTS artwork_unique_per_photo;
+
+Decide whether multiple artworks per photo are desired; if not, keep the unique index and remove the migration.
+
+	3.	Frame-mock call signature mismatch
+services/framemock.createMockups(...) expects an object { artUrl, frameUrl1, ... }, but routes/moderationArtwork.js calls it with only a string (createMockups(art.image_url)).
+Fix: change to:
+
+const mockupUrls = await createMockups({
+  artUrl: art.image_url,
+  frameUrl1: env.frameUrl1,
+  frameUrl2: env.frameUrl2,
+  frameUrl3: env.frameUrl3,
+  orientation: 'horizontal',
+  enableInnerShadow: true
+});
+
+
+	4.	Google CSE env var naming
+env.js reads GOOGLE_CSE_ID into env.googleCseId, but services/google.js uses process.env.GOOGLE_CX.
+Fix: standardize on one name (e.g., GOOGLE_CX) and update env.js and/or services/google.js.
+	5.	Operator UI import
+app/server/app.js imports ./routes/operatorUI.js, which isn’t present in the listed files.
+Fix: add the route or remove the import.
+	6.	In-memory rate limiter & tracker
+rateLimit and artworkTracker are per-process.
+Fix: for HA deployments, use Redis-backed implementations (e.g., rate-limiter-flexible with Redis) and persist the artwork de-dupe state.
+	7.	Hard-coded n8n webhook
+Move the URL into an env var (N8N_WEBHOOK_URL) and guard secrets in logs.
+	8.	Shopify service partial
+Ensure services/shopify.js exposes the needed helpers (product create, media upload, collection linkage) and uses the env.shop normalization already present.
+	9.	Lowercase frame URL envs
+env.js uses frameUrl1/2/3 (lowercase). Consider switching to FRAME_URL1/2/3 for consistency with other envs.
+
+⸻
+
+Example end-to-end flow
+	1.	Ingest: POST /catchments → DB row created → q:catchment job enqueued.
+	2.	Locations: catchment processor seeds + enriches locations (Google Places) → DB rows inserted.
+	3.	Photos: locations processor queries Google CSE/Openverse → photos inserted with metadata.
+	4.	Photo moderation: operator approves a photo → Cloudinary upload → q:artwork job enqueued.
+	5.	Artwork generation: workflow composes prompts (system + enabled style prompts), calls OpenAI, saves artwork with image_url & description.
+	6.	Artwork moderation: operator approves → frame-mock called → mockup_urls saved → q:publish job enqueued.
+	7.	Publish: workflow creates Shopify product (and/or calls n8n) → artwork.shopify_id set → artwork.published = true.
+	8.	Observe: /events SSE shows rollups incrementing for photos kept, artworks, and published.
+
+⸻
+
+That’s the complete picture. If you’re integrating or extending, start by wiring environment variables, run the schema script, post a catchment, and watch the queues do the rest.
+
+================
+File: replacements.txt
+================
+regex:shpat_[A-Za-z0-9]+==>REDACTED
+regex:sk-[A-Za-z0-9_-]{20,}==>REDACTED
+
+================
+File: TODO.md
+================
+# Task Progress
+
+- [ ] Analyze error logs from artwork workflow
+
+
+
+================================================================
+End of Codebase
+================================================================
