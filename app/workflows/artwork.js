@@ -88,7 +88,8 @@ export default async function artwork(job) {
     let res; // Declare res in the outer scope of the for-loop
     for (const stylePrompt of enabledPrompts) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 200_000);
+      // PiAPI can take up to 300s – set generous timeout
+      const timeoutId = setTimeout(() => controller.abort(), 310_000);
 
       try {
         if (usePiapi) {
@@ -110,14 +111,15 @@ export default async function artwork(job) {
           const imageUrl = await generateImage(
             `${stylePrompt.text}. Use reference photo: ${imageSource}`
           );
-          let promptPaintingUrls = [];
+          // ensure promptPaintingUrls is always defined safely
+          var promptPaintingUrls = [];
           if (imageUrl) {
             promptPaintingUrls = [imageUrl];
           } else {
             console.warn('[artwork] No imageUrl returned from PiAPI generateImage()');
           }
           // Wrap res so downstream code that expects res.status doesn't crash
-          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null };
+          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null, promptPaintingUrls };
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
           res = await fetch(PAINT_ENDPOINT, {
@@ -137,7 +139,8 @@ export default async function artwork(job) {
       // Removed redundant post-loop res.status log to prevent ReferenceError when res is undefined
 
       // Handle PiAPI SSE stream parsing
-      let promptPaintingUrls = promptPaintingUrls || [];
+      // Use the PiAPI-provided list if present on res, otherwise fallback to empty array
+      let promptPaintingUrls = (res && res.promptPaintingUrls) ? res.promptPaintingUrls : [];
       let promptFinalUrls = [];
 
       if (!usePiapi) {
@@ -232,7 +235,7 @@ export default async function artwork(job) {
         }
         attempt++;
         let localController = new AbortController();
-        let localTimeoutId = setTimeout(() => localController.abort(), 200_000);
+        let localTimeoutId = setTimeout(() => localController.abort(), 310_000);
         let localRes;
         try {
           console.log('[artwork] Sending request to PiAPI paint endpoint...');
@@ -460,8 +463,8 @@ export default async function artwork(job) {
       console.warn('[artwork] Could not clear in-progress state in tracker', e);
     }
     if (err && err.name === 'AbortError') {
-      console.error(`[artwork] Paint service request timed out after ${200}s`);
-      throw new Error('Paint service request timed out (200s)');
+      console.error(`[artwork] Paint service request timed out after ${310}s`);
+      throw new Error('Paint service request timed out (310s)');
     }
     console.error('artwork workflow failed', { photoId, err });
     throw err;
