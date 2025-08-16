@@ -272,11 +272,11 @@ export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
     }),
   });
 
-  let imageUrl = null;
+  let imageUrls = [];
   const decoder = new TextDecoder();
   try {
     for await (const chunk of resp.body) {
-      const lines = decoder.decode(chunk).split("\\n");
+      const lines = decoder.decode(chunk).split("\n");
       for (const line of lines) {
         if (!line.startsWith("data:")) continue;
         const trimmed = line.replace("data:", "").trim();
@@ -287,8 +287,19 @@ export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
           if (Array.isArray(content)) {
             for (const part of content) {
               if (part.type === "image_url" && part.image_url?.url) {
-                imageUrl = part.image_url.url;
-                log({ event: "generateImage_found_url", traceId, imageUrl });
+                imageUrls.push(part.image_url.url);
+                log({ event: "generateImage_found_url", traceId, imageUrl: part.image_url.url });
+              }
+            }
+          }
+          // Fallback: scan entire JSON chunk for URLs
+          const str = JSON.stringify(data);
+          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+          if (urlMatches) {
+            for (const u of urlMatches) {
+              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
+                imageUrls.push(u);
+                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
               }
             }
           }
@@ -302,8 +313,14 @@ export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
     throw enhanceError(err, { stage: "generateImage", model });
   }
 
-  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, hasImage: Boolean(imageUrl) });
-  return imageUrl;
+  // Deduplicate & normalize
+  imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
+
+  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+  if (imageUrls.length === 0) {
+    throw new Error("PiAPI stream did not include any image URLs");
+  }
+  return imageUrls;
 }
 
 export { openaiClient, piapiClient };
