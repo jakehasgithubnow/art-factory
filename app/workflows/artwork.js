@@ -406,16 +406,7 @@ export default async function artwork(job) {
         }
         // 4. Mock-ups next (best-effort) -- only for first image
         if (i === 0) {
-          let mockups = [];
-          try {
-            console.log('[artwork] Creating mockups...');
-            mockups = await createMockups(url);
-          } catch (e) {
-            console.warn('createMockups failed', e);
-          }
-          console.log('[artwork] Updating artwork record with mockup URLs');
-          await db('artwork').where({ id: artId }).update({ mockup_urls: mockups });
-          // Moderation gate: require approval before publishing unless explicitly disabled
+// Moderation gate: require approval before publishing unless explicitly disabled
           const moderateArtwork = String(process.env.MODERATE_ARTWORK ?? 'true') === 'true';
           if (moderateArtwork) {
             console.log('[artwork] Awaiting artwork moderation before publish. artworkId:', artId);
