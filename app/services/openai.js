@@ -287,23 +287,13 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
         if (trimmed === "[DONE]") continue;
         try {
           const data = JSON.parse(trimmed);
+// Only process explicit image_url parts; avoid regex fallback to reduce noise
           const content = data.choices?.[0]?.delta?.content;
           if (Array.isArray(content)) {
             for (const part of content) {
               if (part.type === "image_url" && part.image_url?.url) {
                 imageUrls.push(part.image_url.url);
                 log({ event: "generateImage_found_url", traceId, imageUrl: part.image_url.url });
-              }
-            }
-          }
-          // Fallback: scan entire JSON chunk for URLs
-          const str = JSON.stringify(data);
-          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
-          if (urlMatches) {
-            for (const u of urlMatches) {
-              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
-                imageUrls.push(u);
-                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
               }
             }
           }
