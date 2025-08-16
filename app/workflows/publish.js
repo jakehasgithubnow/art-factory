@@ -159,16 +159,16 @@ export default async function publish(job) {
       ]
     },
     location_title: row.location_name || '',
-    google_id: row.google_id || '',
-    country: '', // not available without parsing
-    state: '',   // not available without parsing
-    city: '',    // not available without parsing
+    google_id: '', // not present in schema
+    country: '',   // not in schema
+    state: '',     // not in schema
+    city: '',      // not in schema
     formatted_address: row.formatted_address || '',
-    latitude: row.latitude || '',
-    longitude: row.longitude || '',
+    latitude: '',  // not in schema
+    longitude: '', // not in schema
     location_category: row.location_category || '',
     location_description: row.location_description || '',
-    location_photo: row.location_photo || '',
+    location_photo: '', // not in schema
     style_name: '',
     uuid: String(artworkId),
     featured: art.featured || ''
