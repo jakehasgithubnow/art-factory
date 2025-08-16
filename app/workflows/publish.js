@@ -19,11 +19,7 @@ export default async function publish(job) {
       location_name: 'l.name',
       location_description: 'l.description',
       location_category: 'l.category',
-      formatted_address: 'l.g_formatted_address',
-      google_id: 'l.g_place_id',
-      latitude: 'l.g_lat',
-      longitude: 'l.g_lng',
-      location_photo: db.raw("(l.g_photo_refs->>0)")
+      formatted_address: 'l.address'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -168,7 +164,7 @@ export default async function publish(job) {
     longitude: '', // not in schema
     location_category: row.location_category || '',
     location_description: row.location_description || '',
-    location_photo: '', // not in schema
+    location_photo: row.image_source || '', // from schema
     style_name: '',
     uuid: String(artworkId),
     featured: art.featured || ''
