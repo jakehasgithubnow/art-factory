@@ -107,19 +107,19 @@ export default async function artwork(job) {
             console.warn('[artwork][DEBUG] Error checking image URL reachability:', e);
           }
           // --- DEBUG LOGS END ---
+// Use updated generateImage helper with both prompt and imageUrl
           console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${stylePrompt.text}`);
-          const imageUrl = await generateImage(
-            `${stylePrompt.text}. Use reference photo: ${imageSource}`
-          );
-          // ensure promptPaintingUrls is always defined safely
+          const imageUrls = await generateImage({
+            prompt: stylePrompt.text,
+            imageUrl: imageSource,
+          });
           let localPromptPaintingUrls = [];
-          if (imageUrl) {
-            localPromptPaintingUrls = [imageUrl];
+          if (imageUrls && imageUrls.length > 0) {
+            localPromptPaintingUrls = imageUrls;
           } else {
-            console.warn('[artwork] No imageUrl returned from PiAPI generateImage()');
+            console.warn('[artwork] No image URLs returned from PiAPI generateImage()');
           }
-          // Wrap res so downstream code that expects res.status doesn't crash
-          res = { status: imageUrl ? 200 : 500, ok: !!imageUrl, body: null, promptPaintingUrls: localPromptPaintingUrls };
+          res = { status: imageUrls && imageUrls.length > 0 ? 200 : 500, ok: imageUrls && imageUrls.length > 0, body: null, promptPaintingUrls: localPromptPaintingUrls };
         } else {
           console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
           res = await fetch(PAINT_ENDPOINT, {

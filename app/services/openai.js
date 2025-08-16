@@ -249,7 +249,8 @@ export async function chatJson({
  * PiAPI image generation helper (streaming).
  * Consumes SSE stream and extracts image_url(s).
  */
-export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
+// Updated to accept both prompt and imageUrl, building correct PiAPI payload
+export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: "generateImage_start", traceId, model });
@@ -265,7 +266,10 @@ export async function generateImage(prompt, { model = "gpt-4o-image" } = {}) {
       messages: [
         {
           role: "user",
-          content: [{ type: "text", text: prompt }],
+          content: [
+            ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+            { type: "text", text: prompt }
+          ],
         },
       ],
       stream: true,
