@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { log } from '../server/utils/logger.js';
 
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
