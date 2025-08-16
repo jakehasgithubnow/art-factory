@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
   const start = Date.now();
