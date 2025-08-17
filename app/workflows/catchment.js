@@ -5,16 +5,22 @@ import { qLocation } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
+import { getSystemPrompt } from '../db/systemPrompts.js';
 
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
   if (!row || row.processed) return;
 
-  const intro50 = row.intro ?? await chat(
-    'You are a concise travel copywriter. Reply with <=50 words.',
-    `Write a 50-word warm introduction to visiting ${row.name}.`
-  );
+  const sysPrompt = await getSystemPrompt('catchment_intro_system')
+    ?? 'You are a concise travel copywriter. Reply with <=50 words.';
+
+  const userPromptTemplate = await getSystemPrompt('catchment_intro_user')
+    ?? 'Write a 50-word warm introduction to visiting {{catchmentName}}.';
+
+  const userPrompt = userPromptTemplate.replace('{{catchmentName}}', row.name);
+
+  const intro50 = row.intro ?? await chat(sysPrompt, userPrompt);
 
   // Example: perform image search before proceeding (if required by workflow)
   const imageService = imageSource === 'openverse' ? openverse : google;

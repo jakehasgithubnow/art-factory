@@ -1,5 +1,10 @@
 import db from './client.js';
 
+export async function getSystemPrompt(key) {
+  const row = await db('system_prompts').where({ key }).first();
+  return row ? row.prompt : null;
+}
+
 export async function getAll() {
   return db('system_prompts').orderBy('id', 'asc');
 }
