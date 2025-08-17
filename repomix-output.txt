@@ -54,6 +54,9 @@ app/
     migrations/
       20250816_add_g_lat_g_lng.sql
       20250816_drop_artwork_photoid_unique.sql
+      20250817_add_openverse_metadata.sql
+      20250817_migrate_prompts_to_systemprompts.sql
+      20250817_seed_catchment_prompts.sql
     client.js
     schema.sql
     stylePrompts.js
@@ -219,6 +222,53 @@ ALTER TABLE locations
 File: app/db/migrations/20250816_drop_artwork_photoid_unique.sql
 ================
 ALTER TABLE artwork DROP CONSTRAINT artwork_unique_per_photo;
+
+================
+File: app/db/migrations/20250817_add_openverse_metadata.sql
+================
+-- Migration: Add Openverse metadata fields to photos table
+
+ALTER TABLE photos
+  ADD COLUMN openverse_id text,
+  ADD COLUMN title text,
+  ADD COLUMN creator text,
+  ADD COLUMN creator_url text,
+  ADD COLUMN license text,
+  ADD COLUMN license_version text,
+  ADD COLUMN license_url text,
+  ADD COLUMN source text,
+  ADD COLUMN category text,
+  ADD COLUMN provider text,
+  ADD COLUMN thumbnail_url text,
+  ADD COLUMN detail_url text,
+  ADD COLUMN width integer,
+  ADD COLUMN height integer,
+  ADD COLUMN openverse_metadata jsonb DEFAULT '{}'::jsonb;
+
+================
+File: app/db/migrations/20250817_migrate_prompts_to_systemprompts.sql
+================
+-- Migration: seed all former hardcoded prompts into system_prompts
+INSERT INTO system_prompts (key, text, enabled, updated_at)
+VALUES
+  ('artwork_description_system', 'Describe a painting in 35 words.', true, now()),
+  ('photo_scoring_system', 'You rate reference photos for painting. Reply ONLY a decimal 0-1.', true, now()),
+  ('photo_scoring_user', 'Score this image for painting quality (composition, subject clarity, no watermarks): {{imageUrl}}', true, now()),
+  ('catchment_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.', true, now()),
+  ('catchment_intro_user', 'Write a 50-word warm introduction to visiting {{catchmentName}}.', true, now()),
+  ('location_places_system', 'You generate clean JSON for downstream automation.', true, now()),
+  ('location_places_user', 'Return ONLY a minified JSON array (max 10) of interesting public places within 30km of the point (lat: {{lat}}, lon: {{lon}}) around "{{catchmentName}}".\nEach item MUST follow this JSON shape: {"name": string, "address": string, "category": string, "description": string, "search_term": string}.\nThe "search_term" should be what a person would type into an image search to find photos of this exact place (e.g., include the city/neighbourhood).', true, now())
+ON CONFLICT (key) DO NOTHING;
+
+================
+File: app/db/migrations/20250817_seed_catchment_prompts.sql
+================
+-- Seed default prompts for catchment introductions
+
+INSERT INTO system_prompts (key, prompt) VALUES
+  ('catchment_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.'),
+  ('catchment_intro_user', 'Write a 50-word warm introduction to visiting {{catchmentName}}.')
+ON CONFLICT (key) DO NOTHING;
 
 ================
 File: app/db/client.js
@@ -456,6 +506,11 @@ export async function togglePrompt(id, enabled) {
 File: app/db/systemPrompts.js
 ================
 import db from './client.js';
+
+export async function getSystemPrompt(key) {
+  const row = await db('system_prompts').where({ key }).first();
+  return row ? row.text : null;
+}
 
 export async function getAll() {
   return db('system_prompts').orderBy('id', 'asc');
@@ -786,10 +841,21 @@ import { requireApiKey } from '../../middleware/requireApiKey.js';
 import { getAll as getStylePrompts, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
 import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
 
+function escapeHtml(str) {
+  if (str === undefined || str === null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const router = express.Router();
+router.use(express.urlencoded({ extended: true }));
 
 // Admin UI page - system prompts + style prompts
-router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
+router.get('/admin/style-prompts-ui', async (req, res, next) => {
   try {
     const [stylePrompts, systemPrompts] = await Promise.all([
       getStylePrompts(),
@@ -809,7 +875,7 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
             ${systemPrompts.map(p => `
               <div>
                 <label for="${p.key}">${p.key}</label><br/>
-                <textarea name="${p.key}" rows="3" cols="80">${p.text}</textarea><br/>
+                <textarea name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea><br/>
               </div>
             `).join('')}
             <button type="submit">Save System Prompts</button>
@@ -820,7 +886,7 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
             ${stylePrompts.map(p => `
               <div>
                 <label for="style-${p.id}">Prompt #${p.id}</label><br/>
-                <textarea name="text_${p.id}" rows="2" cols="80">${p.text}</textarea><br/>
+                <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
                 <label>
                   <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
                 </label>
@@ -839,10 +905,15 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
 // Handle updates for system prompts
 router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   try {
+    // Build a lookup of current enabled states so we don't clobber them on save
+    const currentList = await getSystemPrompts();
+    const enabledByKey = Object.fromEntries(currentList.map(p => [p.key, !!p.enabled]));
+
     const updates = Object.entries(req.body);
     console.log('SystemPrompt Update body:', req.body);
     for (const [key, text] of updates) {
-      await updateSystemPrompt(key, text || "", true);
+      const enabled = enabledByKey.hasOwnProperty(key) ? enabledByKey[key] : true;
+      await updateSystemPrompt(key, text || "", enabled);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
@@ -852,7 +923,7 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
 
   
 // Handle updates for style prompts
-router.post('/admin/style-prompts-ui/update', requireApiKey, async (req, res, next) => {
+router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
@@ -1323,20 +1394,21 @@ router.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
-        'p.ov_id',
-        'p.ov_title',
-        'p.ov_creator',
-        'p.ov_creator_url',
-        'p.ov_license',
-        'p.ov_license_version',
-        'p.ov_license_url',
-        'p.ov_source',
-        'p.ov_category',
-        'p.ov_provider',
-        'p.ov_thumbnail',
-        'p.ov_detail_url',
-        'p.ov_width',
-        'p.ov_height'
+        'p.openverse_id',
+        'p.title',
+        'p.creator',
+        'p.creator_url',
+        'p.license',
+        'p.license_version',
+        'p.license_url',
+        'p.source',
+        'p.category',
+        'p.provider',
+        'p.thumbnail_url',
+        'p.detail_url',
+        'p.width',
+        'p.height',
+        'p.openverse_metadata'
       )
       .where('l.catchment_id', catchmentId)
       .orderBy('p.created_at','desc');
@@ -1541,9 +1613,9 @@ export function createApp() {
 
   app.disable('x-powered-by');
 
-  // Enable body parsing for JSON and forms
-  app.use(express.json({ limit: '1mb' }));
+  // Enable body parsing for forms and JSON
   app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: '1mb' }));
 
   // ---------- Basic structured request logging ----------
   app.use((req, res, next) => {
@@ -2154,7 +2226,20 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
         temperature,
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: user },
+          {
+            role: 'user',
+            content: Array.isArray(user?.imageUrls) || user?.text
+              ? [
+                  ...(Array.isArray(user.imageUrls)
+                    ? user.imageUrls.map(url => ({
+                        type: 'image_url',
+                        image_url: { url },
+                      }))
+                    : []),
+                  ...(user?.text ? [{ type: 'text', text: user.text }] : []),
+                ]
+              : user,
+          },
         ],
       }),
     });
@@ -2247,7 +2332,20 @@ export async function chatJson({
           response_format,
           messages: [
             { role: 'system', content: schema ? `${system}\n\nReturn ONLY minified JSON strictly matching the provided schema.` : `${system}\n\nReturn ONLY minified JSON.` },
-            { role: 'user', content: user },
+            {
+              role: 'user',
+              content: Array.isArray(user?.imageUrls) || user?.text
+                ? [
+                    ...(Array.isArray(user.imageUrls)
+                      ? user.imageUrls.map(url => ({
+                          type: 'image_url',
+                          image_url: { url },
+                        }))
+                      : []),
+                    ...(user?.text ? [{ type: 'text', text: user.text }] : []),
+                  ]
+                : user,
+            },
           ],
         }),
       });
@@ -2867,7 +2965,7 @@ export default async function artwork(job) {
         // Load system prompt for artwork description from DB
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
-        const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
+        const sysPrompt = sysPromptRow?.text;
 
         try {
           description = await chat(
@@ -3063,8 +3161,11 @@ export default async function artwork(job) {
     // 2. GPT auto-description (use first painting for description)
     const mainPaintingUrl = finalPaintingUrls[0];
     console.log('[artwork] Requesting GPT auto-description for painting...');
+    const { getByKey: getSysPrompt } = await import('../db/systemPrompts.js');
+    const sysPromptRow2 = await getSysPrompt('artwork_description_system');
+    const sysPrompt2 = sysPromptRow2?.text;
     const description = await chat(
-      'Describe a painting in 35 words.',
+      sysPrompt2,
       `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
     );
 
@@ -3156,16 +3257,21 @@ import { qLocation } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
+import { getSystemPrompt } from '../db/systemPrompts.js';
 
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
   if (!row || row.processed) return;
 
-  const intro50 = row.intro ?? await chat(
-    'You are a concise travel copywriter. Reply with <=50 words.',
-    `Write a 50-word warm introduction to visiting ${row.name}.`
-  );
+  const sysPrompt = await getSystemPrompt('catchment_intro_system');
+  const userPromptTemplate = await getSystemPrompt('catchment_intro_user');
+  const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
+
+  const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
+  const safeUser = typeof userPrompt === 'string' ? userPrompt : `Write a short introduction for ${row.name}.`;
+
+  const intro50 = row.intro ?? await chat(safeSystem, safeUser);
 
   // Example: perform image search before proceeding (if required by workflow)
   const imageService = imageSource === 'openverse' ? openverse : google;
@@ -3248,10 +3354,15 @@ export default async function locations(job) {
   // Load system prompt for location places from DB
   const { getByKey } = await import('../db/systemPrompts.js');
   const sysPromptRow = await getByKey('location_places_system');
-  const system = sysPromptRow?.text || 'You generate clean JSON for downstream automation.';
-  const user = `Return ONLY a minified JSON array (max 10) of interesting public places within 30km of the point (lat: ${catchment.lat}, lon: ${catchment.lon}) around "${catchment.name}".
-Each item MUST follow this JSON shape: {"name": string, "address": string, "category": string, "description": string, "search_term": string}.
-The "search_term" should be what a person would type into an image search to find photos of this exact place (e.g., include the city/neighbourhood).`;
+  const system = sysPromptRow?.text;
+
+  const { getByKey: getUserPrompt } = await import('../db/systemPrompts.js');
+  const userPromptRow = await getUserPrompt('location_places_user');
+  const userTemplate = userPromptRow?.text;
+  const user = userTemplate
+    ?.replace('{{lat}}', catchment.lat)
+    ?.replace('{{lon}}', catchment.lon)
+    ?.replace('{{catchmentName}}', catchment.name);
 
   let places = [];
   try {
@@ -3361,9 +3472,15 @@ export default async function photos(job) {
     // 1) Ask GPT to score (best-effort; never throw the worker)
     let score = 0;
     try {
+      const { getByKey } = await import('../db/systemPrompts.js');
+      const sysPromptRow = await getByKey('photo_scoring_system');
+      const sysPrompt = sysPromptRow?.text;
+      const userPromptRow = await getByKey('photo_scoring_user');
+      const userTemplate = userPromptRow?.text;
+      const userPrompt = userTemplate?.replace('{{imageUrl}}', srcUrl);
       const scoreTxt = await chat(
-        'You rate reference photos for painting. Reply ONLY a decimal 0-1.',
-        `Score this image for painting quality (composition, subject clarity, no watermarks): ${srcUrl}`,
+        sysPrompt,
+        userPrompt,
         0
       );
       score = clamp01(Number(scoreTxt));
@@ -3381,20 +3498,21 @@ export default async function photos(job) {
 
       // If this is from Openverse, store the metadata fields
       if (img.id) {
-        insertData.ov_id = img.id || null;
-        insertData.ov_title = img.title || null;
-        insertData.ov_creator = img.creator || null;
-        insertData.ov_creator_url = img.creator_url || null;
-        insertData.ov_license = img.license || null;
-        insertData.ov_license_version = img.license_version || null;
-        insertData.ov_license_url = img.license_url || null;
-        insertData.ov_source = img.source || null;
-        insertData.ov_category = img.category || null;
-        insertData.ov_provider = img.provider || null;
-        insertData.ov_thumbnail = img.thumbnail || null;
-        insertData.ov_detail_url = img.detail_url || null;
-        insertData.ov_width = img.width || null;
-        insertData.ov_height = img.height || null;
+        insertData.openverse_id = img.id || null;
+        insertData.title = img.title || null;
+        insertData.creator = img.creator || null;
+        insertData.creator_url = img.creator_url || null;
+        insertData.license = img.license || null;
+        insertData.license_version = img.license_version || null;
+        insertData.license_url = img.license_url || null;
+        insertData.source = img.source || null;
+        insertData.category = img.category || null;
+        insertData.provider = img.provider || null;
+        insertData.thumbnail_url = img.thumbnail || null;
+        insertData.detail_url = img.detail_url || null;
+        insertData.width = img.width || null;
+        insertData.height = img.height || null;
+        insertData.openverse_metadata = img || {};
       }
 
       const insert = await db('photos')
@@ -3726,9 +3844,12 @@ async function load(){
     card.innerHTML = \`
       <img class="img" src="\${p.src_url}" alt=""/>
       <div class="meta">
-        <div class="small muted">\${p.ov_title || ''} \${p.ov_creator ? '— ' + p.ov_creator : ''}</div>
-        <div class="small muted">\${p.ov_license || ''} \${p.ov_license_version || ''}</div>
-        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false}</div></div>
+        <div class="small muted"><b>\${p.title || ''}</b> \${p.creator ? '— ' + p.creator : ''}</div>
+        <div class="small muted">License: \${p.license || ''} \${p.license_version || ''}</div>
+        <div class="small muted">Source: \${p.source || ''} \${p.provider ? '('+p.provider+')' : ''}</div>
+        <div class="small muted">Dims: \${p.width||''}×\${p.height||''}</div>
+        <div class="small muted"><a href="\${p.detail_url||'#'}" target="_blank">Details</a> · <a href="\${p.creator_url||'#'}" target="_blank">Creator</a></div>
+        <div class="row"><div>Score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · Kept: \${p.kept ? true : false}</div></div>
         <div class="row">
           <button data-act="approve" data-id="\${p.id}">Approve</button>
           <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
@@ -3842,20 +3963,21 @@ app.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
-        'p.ov_id',
-        'p.ov_title',
-        'p.ov_creator',
-        'p.ov_creator_url',
-        'p.ov_license',
-        'p.ov_license_version',
-        'p.ov_license_url',
-        'p.ov_source',
-        'p.ov_category',
-        'p.ov_provider',
-        'p.ov_thumbnail',
-        'p.ov_detail_url',
-        'p.ov_width',
-        'p.ov_height'
+        'p.openverse_id',
+        'p.title',
+        'p.creator',
+        'p.creator_url',
+        'p.license',
+        'p.license_version',
+        'p.license_url',
+        'p.source',
+        'p.category',
+        'p.provider',
+        'p.thumbnail_url',
+        'p.detail_url',
+        'p.width',
+        'p.height',
+        'p.openverse_metadata'
       )
       .where('l.catchment_id', catchmentId)
       .orderBy('p.created_at','desc');
