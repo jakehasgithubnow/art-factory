@@ -14,9 +14,10 @@ function escapeHtml(str) {
 }
 
 const router = express.Router();
+router.use(express.urlencoded({ extended: true }));
 
 // Admin UI page - system prompts + style prompts
-router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
+router.get('/admin/style-prompts-ui', async (req, res, next) => {
   try {
     const [stylePrompts, systemPrompts] = await Promise.all([
       getStylePrompts(),
@@ -64,7 +65,7 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
 });
 
 // Handle updates for system prompts
-router.post('/admin/system-prompts-ui/update', requireApiKey, async (req, res, next) => {
+router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   try {
     // Build a lookup of current enabled states so we don't clobber them on save
     const currentList = await getSystemPrompts();
@@ -84,7 +85,7 @@ router.post('/admin/system-prompts-ui/update', requireApiKey, async (req, res, n
 
   
 // Handle updates for style prompts
-router.post('/admin/style-prompts-ui/update', requireApiKey, async (req, res, next) => {
+router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
