@@ -10,16 +10,14 @@ export async function getByKey(key) {
 
 export async function updatePrompt(key, text, enabled = true) {
   const existing = await db('system_prompts').where({ key }).first();
-  let prompt;
   if (existing) {
-    [prompt] = await db('system_prompts')
+    await db('system_prompts')
       .where({ key })
-      .update({ text, enabled, updated_at: db.fn.now() })
-      .returning('*');
+      .update({ text, enabled, updated_at: db.fn.now() });
+    return db('system_prompts').where({ key }).first();
   } else {
-    [prompt] = await db('system_prompts')
-      .insert({ key, text, enabled })
-      .returning('*');
+    await db('system_prompts')
+      .insert({ key, text, enabled, updated_at: db.fn.now() });
+    return db('system_prompts').where({ key }).first();
   }
-  return prompt;
 }
