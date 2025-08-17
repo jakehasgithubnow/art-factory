@@ -52,7 +52,7 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
 });
 
 // Handle updates for system prompts
-router.post('/admin/system-prompts-ui/update', requireApiKey, async (req, res, next) => {
+router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   try {
     const updates = Object.entries(req.body);
     for (const [key, text] of updates) {
