@@ -50,10 +50,15 @@ export default async function locations(job) {
   // Load system prompt for location places from DB
   const { getByKey } = await import('../db/systemPrompts.js');
   const sysPromptRow = await getByKey('location_places_system');
-  const system = sysPromptRow?.text || 'You generate clean JSON for downstream automation.';
-  const user = `Return ONLY a minified JSON array (max 10) of interesting public places within 30km of the point (lat: ${catchment.lat}, lon: ${catchment.lon}) around "${catchment.name}".
-Each item MUST follow this JSON shape: {"name": string, "address": string, "category": string, "description": string, "search_term": string}.
-The "search_term" should be what a person would type into an image search to find photos of this exact place (e.g., include the city/neighbourhood).`;
+  const system = sysPromptRow?.text;
+
+  const { getByKey: getUserPrompt } = await import('../db/systemPrompts.js');
+  const userPromptRow = await getUserPrompt('location_places_user');
+  const userTemplate = userPromptRow?.text;
+  const user = userTemplate
+    ?.replace('{{lat}}', catchment.lat)
+    ?.replace('{{lon}}', catchment.lon)
+    ?.replace('{{catchmentName}}', catchment.name);
 
   let places = [];
   try {

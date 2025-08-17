@@ -173,7 +173,7 @@ export default async function artwork(job) {
         // Load system prompt for artwork description from DB
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
-        const sysPrompt = sysPromptRow?.text || 'Describe a painting in 35 words.';
+        const sysPrompt = sysPromptRow?.text;
 
         try {
           description = await chat(
@@ -369,8 +369,11 @@ export default async function artwork(job) {
     // 2. GPT auto-description (use first painting for description)
     const mainPaintingUrl = finalPaintingUrls[0];
     console.log('[artwork] Requesting GPT auto-description for painting...');
+    const { getByKey: getSysPrompt } = await import('../db/systemPrompts.js');
+    const sysPromptRow2 = await getSysPrompt('artwork_description_system');
+    const sysPrompt2 = sysPromptRow2?.text;
     const description = await chat(
-      'Describe a painting in 35 words.',
+      sysPrompt2,
       `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
     );
 

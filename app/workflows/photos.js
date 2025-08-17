@@ -45,9 +45,15 @@ export default async function photos(job) {
     // 1) Ask GPT to score (best-effort; never throw the worker)
     let score = 0;
     try {
+      const { getByKey } = await import('../db/systemPrompts.js');
+      const sysPromptRow = await getByKey('photo_scoring_system');
+      const sysPrompt = sysPromptRow?.text;
+      const userPromptRow = await getByKey('photo_scoring_user');
+      const userTemplate = userPromptRow?.text;
+      const userPrompt = userTemplate?.replace('{{imageUrl}}', srcUrl);
       const scoreTxt = await chat(
-        'You rate reference photos for painting. Reply ONLY a decimal 0-1.',
-        `Score this image for painting quality (composition, subject clarity, no watermarks): ${srcUrl}`,
+        sysPrompt,
+        userPrompt,
         0
       );
       score = clamp01(Number(scoreTxt));

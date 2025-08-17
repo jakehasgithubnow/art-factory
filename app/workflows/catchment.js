@@ -12,13 +12,12 @@ export default async function catchment(job) {
   const row = await db('catchments').where({ id: catchmentId }).first();
   if (!row || row.processed) return;
 
-  const sysPrompt = await getSystemPrompt('catchment_intro_system')
-    ?? 'You are a concise travel copywriter. Reply with <=50 words.';
+  const sysPromptRow = await getSystemPrompt('catchment_intro_system');
+  const sysPrompt = sysPromptRow?.text;
 
-  const userPromptTemplate = await getSystemPrompt('catchment_intro_user')
-    ?? 'Write a 50-word warm introduction to visiting {{catchmentName}}.';
-
-  const userPrompt = userPromptTemplate.replace('{{catchmentName}}', row.name);
+  const userPromptRow = await getSystemPrompt('catchment_intro_user');
+  const userPromptTemplate = userPromptRow?.text;
+  const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
 
   const intro50 = row.intro ?? await chat(sysPrompt, userPrompt);
 
