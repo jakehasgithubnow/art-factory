@@ -22,9 +22,9 @@ export function createApp() {
 
   app.disable('x-powered-by');
 
-  // Enable body parsing for JSON and forms
-  app.use(express.json({ limit: '1mb' }));
+  // Enable body parsing for forms and JSON
   app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: '1mb' }));
 
   // ---------- Basic structured request logging ----------
   app.use((req, res, next) => {
