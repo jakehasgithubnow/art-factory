@@ -20,11 +20,11 @@ import stylePromptsUI from './routes/admin/stylePromptsUI.js';
 export function createApp() {
   const app = express();
 
-// Enable body parsing for JSON and forms
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
   app.disable('x-powered-by');
+
+  // Enable body parsing for JSON and forms
   app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true }));
 
   // ---------- Basic structured request logging ----------
   app.use((req, res, next) => {
