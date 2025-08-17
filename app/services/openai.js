@@ -26,7 +26,20 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
         temperature,
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: user },
+          {
+            role: 'user',
+            content: Array.isArray(user?.imageUrls) || user?.text
+              ? [
+                  ...(Array.isArray(user.imageUrls)
+                    ? user.imageUrls.map(url => ({
+                        type: 'image_url',
+                        image_url: { url },
+                      }))
+                    : []),
+                  ...(user?.text ? [{ type: 'text', text: user.text }] : []),
+                ]
+              : user,
+          },
         ],
       }),
     });
@@ -119,7 +132,20 @@ export async function chatJson({
           response_format,
           messages: [
             { role: 'system', content: schema ? `${system}\n\nReturn ONLY minified JSON strictly matching the provided schema.` : `${system}\n\nReturn ONLY minified JSON.` },
-            { role: 'user', content: user },
+            {
+              role: 'user',
+              content: Array.isArray(user?.imageUrls) || user?.text
+                ? [
+                    ...(Array.isArray(user.imageUrls)
+                      ? user.imageUrls.map(url => ({
+                          type: 'image_url',
+                          image_url: { url },
+                        }))
+                      : []),
+                    ...(user?.text ? [{ type: 'text', text: user.text }] : []),
+                  ]
+                : user,
+            },
           ],
         }),
       });
