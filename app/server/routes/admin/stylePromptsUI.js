@@ -13,6 +13,8 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
       getSystemPrompts()
     ]);
 
+    res.set('Cache-Control', 'no-store');
+
     res.send(`
       <html>
         <head>
@@ -55,10 +57,9 @@ router.get('/admin/style-prompts-ui', requireApiKey, async (req, res, next) => {
 router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   try {
     const updates = Object.entries(req.body);
+    console.log('SystemPrompt Update body:', req.body);
     for (const [key, text] of updates) {
-      if (text) {
-        await updateSystemPrompt(key, text, true);
-      }
+      await updateSystemPrompt(key, text || "", true);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
