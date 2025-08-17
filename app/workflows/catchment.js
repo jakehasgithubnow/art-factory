@@ -12,14 +12,14 @@ export default async function catchment(job) {
   const row = await db('catchments').where({ id: catchmentId }).first();
   if (!row || row.processed) return;
 
-  const sysPromptRow = await getSystemPrompt('catchment_intro_system');
-  const sysPrompt = sysPromptRow?.text;
-
-  const userPromptRow = await getSystemPrompt('catchment_intro_user');
-  const userPromptTemplate = userPromptRow?.text;
+  const sysPrompt = await getSystemPrompt('catchment_intro_system');
+  const userPromptTemplate = await getSystemPrompt('catchment_intro_user');
   const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
 
-  const intro50 = row.intro ?? await chat(sysPrompt, userPrompt);
+  const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
+  const safeUser = typeof userPrompt === 'string' ? userPrompt : `Write a short introduction for ${row.name}.`;
+
+  const intro50 = row.intro ?? await chat(safeSystem, safeUser);
 
   // Example: perform image search before proceeding (if required by workflow)
   const imageService = imageSource === 'openverse' ? openverse : google;
