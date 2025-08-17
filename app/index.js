@@ -94,9 +94,12 @@ async function load(){
     card.innerHTML = \`
       <img class="img" src="\${p.src_url}" alt=""/>
       <div class="meta">
-        <div class="small muted">\${p.ov_title || ''} \${p.ov_creator ? '— ' + p.ov_creator : ''}</div>
-        <div class="small muted">\${p.ov_license || ''} \${p.ov_license_version || ''}</div>
-        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false}</div></div>
+        <div class="small muted"><b>\${p.title || ''}</b> \${p.creator ? '— ' + p.creator : ''}</div>
+        <div class="small muted">License: \${p.license || ''} \${p.license_version || ''}</div>
+        <div class="small muted">Source: \${p.source || ''} \${p.provider ? '('+p.provider+')' : ''}</div>
+        <div class="small muted">Dims: \${p.width||''}×\${p.height||''}</div>
+        <div class="small muted"><a href="\${p.detail_url||'#'}" target="_blank">Details</a> · <a href="\${p.creator_url||'#'}" target="_blank">Creator</a></div>
+        <div class="row"><div>Score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · Kept: \${p.kept ? true : false}</div></div>
         <div class="row">
           <button data-act="approve" data-id="\${p.id}">Approve</button>
           <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>

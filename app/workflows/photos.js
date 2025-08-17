@@ -71,20 +71,21 @@ export default async function photos(job) {
 
       // If this is from Openverse, store the metadata fields
       if (img.id) {
-        insertData.ov_id = img.id || null;
-        insertData.ov_title = img.title || null;
-        insertData.ov_creator = img.creator || null;
-        insertData.ov_creator_url = img.creator_url || null;
-        insertData.ov_license = img.license || null;
-        insertData.ov_license_version = img.license_version || null;
-        insertData.ov_license_url = img.license_url || null;
-        insertData.ov_source = img.source || null;
-        insertData.ov_category = img.category || null;
-        insertData.ov_provider = img.provider || null;
-        insertData.ov_thumbnail = img.thumbnail || null;
-        insertData.ov_detail_url = img.detail_url || null;
-        insertData.ov_width = img.width || null;
-        insertData.ov_height = img.height || null;
+        insertData.openverse_id = img.id || null;
+        insertData.title = img.title || null;
+        insertData.creator = img.creator || null;
+        insertData.creator_url = img.creator_url || null;
+        insertData.license = img.license || null;
+        insertData.license_version = img.license_version || null;
+        insertData.license_url = img.license_url || null;
+        insertData.source = img.source || null;
+        insertData.category = img.category || null;
+        insertData.provider = img.provider || null;
+        insertData.thumbnail_url = img.thumbnail || null;
+        insertData.detail_url = img.detail_url || null;
+        insertData.width = img.width || null;
+        insertData.height = img.height || null;
+        insertData.openverse_metadata = img || {};
       }
 
       const insert = await db('photos')
