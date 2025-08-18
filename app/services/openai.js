@@ -12,6 +12,7 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
+    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   try {
@@ -19,7 +20,9 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey}`,
+        Authorization: `Bearer ${/piapi\.ai/i.test(endpoint)
+          ? (process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY || env.openaiKey || process.env.OPENAI_API_KEY)
+          : (process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY)}`,
       },
       body: JSON.stringify({
         model,
@@ -81,6 +84,7 @@ export async function chatJson({
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
+    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   // Helper: tolerant JSON parse (tries to extract a balanced object/array if extra text slips in)
@@ -122,10 +126,12 @@ export async function chatJson({
     try {
       const resp = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey}`,
-        },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${/piapi\.ai/i.test(endpoint)
+              ? (process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY || env.openaiKey || process.env.OPENAI_API_KEY)
+              : (process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY)}`,
+          },
         body: JSON.stringify({
           model,
           temperature,

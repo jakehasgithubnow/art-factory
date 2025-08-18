@@ -18,9 +18,16 @@ function clamp01(n) {
 
 function to01(text) {
   const s = String(text || '').trim();
-  // Find first explicit 0 or 1; default to 0 if ambiguous
-  const m = s.match(/[01]/);
-  return m && m[0] === '1' ? 1 : 0;
+  // If it's a strict single char 0/1, use it directly
+  if (/^[01]$/.test(s)) return Number(s);
+  // If it's a numeric string like 0.65, parse and threshold at 0.5
+  const num = Number.parseFloat(s);
+  if (Number.isFinite(num)) return num >= 0.5 ? 1 : 0;
+  // Fallback: look for any 0/1 digit hints; prefer '1' if clearly present
+  const digits = s.match(/[01]/g);
+  if (digits && digits.length) return digits.includes('1') && !digits.every(d => d === '0') ? 1 : 0;
+  // Default conservative: delete
+  return 0;
 }
 
 export default async function photos(job) {
@@ -125,8 +132,11 @@ export default async function photos(job) {
       // Classify with gpt-4.1-mini: expect '0' or '1'
       let keep = 0;
       try {
+        const sysForBinary = (typeof sysPrompt === 'string' && sysPrompt.trim())
+          ? `${sysPrompt}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
+          : 'Return ONLY a single character: 1 (keep) or 0 (delete).';
         const result = await chat(
-          sysPrompt,
+          sysForBinary,
           { imageUrls: [thumbUrl], text: userText },
           0,
           'gpt-4.1-mini'

@@ -46,10 +46,12 @@ export async function imageSearch(query, num = 10, options = {}) {
     openverseParams = {},
   } = options || {};
 
-  // Calculate fetch size
+  // Calculate fetch size (respect Openverse anonymous per-page limit of 20)
+  const hasKey = Boolean(env.openverseApiKey);
   const target = Math.max(1, Number(num) || 10);
   const defaultCandidate = Math.max(target * 6, 40);
-  const hardCap = Math.max(1, perPage * maxPages);
+  const perPageLimit = hasKey ? perPage : Math.min(perPage, 20);
+  const hardCap = Math.max(1, perPageLimit * maxPages);
   const candidateSize = Math.min(
     Math.max(1, Number(options?.candidateSize) || defaultCandidate),
     hardCap,
@@ -67,7 +69,7 @@ export async function imageSearch(query, num = 10, options = {}) {
     const all = [];
     let page = 1;
     while (all.length < candidateSize && page <= maxPages) {
-      const pageSize = Math.min(perPage, candidateSize - all.length);
+      const pageSize = Math.min(perPageLimit, candidateSize - all.length);
       const qs = new URLSearchParams({
         q: String(query || ''),
         page_size: String(pageSize),
@@ -75,6 +77,9 @@ export async function imageSearch(query, num = 10, options = {}) {
         ...Object.fromEntries(
           Object.entries(openverseParams || {}).flatMap(([k, v]) => {
             if (v == null || v === '') return [];
+            const key = String(k).toLowerCase();
+            // Prevent overriding reserved params
+            if (key === 'q' || key === 'page' || key === 'page_size') return [];
             return [[k, String(v)]];
           }),
         ),
