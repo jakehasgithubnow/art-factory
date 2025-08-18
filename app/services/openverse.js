@@ -56,7 +56,10 @@ export async function imageSearch(query, num = 10, options = {}) {
   );
 
   try {
-    const headers = {};
+    const headers = {
+      Accept: 'application/json',
+      'User-Agent': env.openverseUserAgent || `art-factory/${process.env.npm_package_version || '0.0.0'} (+${env.appContact || 'https://github.com/jakehasgithubnow/art-factory'})`,
+    };
     if (env.openverseApiKey) {
       headers['Authorization'] = `Bearer ${env.openverseApiKey}`;
     }
@@ -80,6 +83,12 @@ export async function imageSearch(query, num = 10, options = {}) {
       const url = `https://api.openverse.org/v1/images/?${qs}`;
       const res = await fetch(url, { headers });
       log({ event: 'page_fetch', traceId, page, status: res.status, statusText: res.statusText });
+      if (!res.ok) {
+        let preview = '';
+        try { preview = await res.text(); } catch {}
+        log({ event: 'page_http_error', traceId, page, status: res.status, preview: String(preview).slice(0, 400) });
+        break;
+      }
 
       let json;
       try {

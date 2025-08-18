@@ -38,6 +38,8 @@ export const env = {
 
   // Openverse (image search)
   openverseApiKey: optional('OPENVERSE_API_KEY'),
+  openverseUserAgent: optional('OPENVERSE_USER_AGENT'),
+  appContact: optional('APP_CONTACT'),
 
   // Cloudinary
   cloudName: optional('CLOUDINARY_CLOUD_NAME'),
