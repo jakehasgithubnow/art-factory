@@ -158,7 +158,7 @@ function cardHTML(p) {
   return \`
   <div class="card" id="card-\${p.id}" data-id="\${p.id}">
     <div class="strike"></div>
-    <img class="img" src="\${p.src_url}" alt=""/>
+    <img class="img" src="\${p.ov_thumbnail || p.src_url}" alt=""/>
     <div class="meta">
       <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
       <div class="badge pass">PASS</div>
