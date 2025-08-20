@@ -1,7 +1,7 @@
 import db from '../db/client.js';
 import * as n8n from '../services/n8n.js';
 import { env } from '../config/env.js';
-import { createProductRaw, setMetafieldsGraphQL } from '../services/shopify.js';
+import { createProductRaw, setMetafieldsGraphQL, setProductMetafieldsREST } from '../services/shopify.js';
 const { sendProduct } = n8n;
 
 export default async function publish(job) {
@@ -234,11 +234,26 @@ export default async function publish(job) {
     if (imgs[3]?.src) meta.push({ namespace: 'images', key: 'image4', type: 'single_line_text_field', value: String(imgs[3].src) });
     if (payload.featured) meta.push({ namespace: 'notes', key: 'features', type: 'single_line_text_field', value: String(payload.featured) });
 
+    // Prefer REST for reliability (observed success in n8n); fall back to GraphQL if REST fails
     try {
-      await setMetafieldsGraphQL(ownerId, meta);
-    } catch (err) {
-      console.error('publish: setMetafieldsGraphQL failed', { artworkId, ownerId, err });
-      if (env.requireMetafieldsSuccess) throw err;
+      await setProductMetafieldsREST(created.id, meta);
+    } catch (restErr) {
+      console.warn('publish: REST metafields failed, attempting GraphQL fallback', { artworkId, productId: created?.id, restErr });
+      try {
+        const gqlRes = await setMetafieldsGraphQL(ownerId, meta);
+        const gqlErrors = Array.isArray(gqlRes?.userErrors) ? gqlRes.userErrors : [];
+        if (gqlErrors.length) {
+          console.error('publish: GraphQL metafieldsSet returned userErrors after REST failure', {
+            artworkId,
+            ownerId,
+            userErrors: gqlErrors
+          });
+          if (env.requireMetafieldsSuccess) throw new Error(`GraphQL userErrors: ${JSON.stringify(gqlErrors)}`);
+        }
+      } catch (gqlErr) {
+        console.error('publish: GraphQL metafields fallback failed', { artworkId, ownerId, gqlErr });
+        if (env.requireMetafieldsSuccess) throw gqlErr;
+      }
     }
   }
 }

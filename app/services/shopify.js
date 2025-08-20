@@ -265,6 +265,25 @@ export async function setMetafieldsGraphQL(ownerId, metafields) {
   const body = JSON.stringify({ query, variables });
   const res = await fetchJson('/graphql.json', { method: 'POST', body });
 
+  // Handle GraphQL top-level errors (HTTP 200 with errors array)
+  const topErrors = Array.isArray(res?.errors)
+    ? res.errors.map(e => ({
+        field: Array.isArray(e?.path) ? e.path.join('.') : undefined,
+        message: e?.message || 'GraphQL error'
+      }))
+    : [];
+
+  if (topErrors.length) {
+    log({ event: 'graphql_top_level_errors', traceId, errors: topErrors });
+    if (env.requireMetafieldsSuccess) {
+      const err = new Error(`Shopify GraphQL errors: ${JSON.stringify(topErrors)}`);
+      err.context = { ownerId, topErrors };
+      throw err;
+    }
+    // Return in a shape that callers treat as userErrors to trigger REST fallback
+    return { metafields: [], userErrors: topErrors };
+  }
+
   // n8n referenced shape: { data: { metafieldsSet: { metafields, userErrors } } }
   const out = res?.data?.metafieldsSet || res?.metafieldsSet || res;
   const userErrors = Array.isArray(out?.userErrors) ? out.userErrors : [];
@@ -284,4 +303,38 @@ export async function setMetafieldsGraphQL(ownerId, metafields) {
   }
 
   return out;
+}
+
+/**
+ * Fallback: Set product metafields via REST endpoint.
+ * @param {number|string} productId
+ * @param {Array<{namespace:string,key:string,type:string,value:string}>} metafields
+ */
+export async function setProductMetafieldsREST(productId, metafields) {
+  if (!productId) throw new Error('setProductMetafieldsREST: productId is required');
+  const traceId = randomUUID();
+
+  const meta = Array.isArray(metafields)
+    ? metafields.filter(m => m && m.namespace && m.key && m.type)
+    : [];
+
+  if (!meta.length) {
+    log({ event: 'rest_metafields_set_skipped', traceId, reason: 'no_valid_metafields' });
+    return;
+  }
+
+  for (const mf of meta) {
+    const body = JSON.stringify({
+      metafield: {
+        namespace: mf.namespace,
+        key: mf.key,
+        type: mf.type,
+        value: String(mf.value ?? ''),
+      },
+    });
+    log({ event: 'rest_metafield_attach', traceId, productId, namespace: mf.namespace, key: mf.key, type: mf.type });
+    await fetchJson(`/products/${productId}/metafields.json`, { method: 'POST', body });
+  }
+
+  log({ event: 'rest_metafields_set_done', traceId, productId });
 }
