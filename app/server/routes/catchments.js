@@ -17,25 +17,57 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
     const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
-    const insert = await db('catchments')
-      .insert({ name, lat, lon, intro })
-      .returning(['id']);
-    const id = insert?.[0]?.id;
-    if (!id) throw new Error('Failed to create catchment');
-    if (typeof req.log === 'function') {
-      req.log({ event: 'catchment_inserted', catchmentId: id });
+    // Find-or-create to avoid 23505 on unique (lower(name), lat, lon)
+    let id;
+    try {
+      const existing = await db('catchments')
+        .whereRaw('lower(name) = ? and lat = ? and lon = ?', [name.toLowerCase(), lat, lon])
+        .first('id');
+
+      if (existing?.id) {
+        id = existing.id;
+        if (typeof req.log === 'function') {
+          req.log({ event: 'catchment_found', catchmentId: id });
+        }
+      } else {
+        const insert = await db('catchments')
+          .insert({ name, lat, lon, intro })
+          .returning(['id']);
+        id = insert?.[0]?.id;
+        if (!id) throw new Error('Failed to create catchment');
+        if (typeof req.log === 'function') {
+          req.log({ event: 'catchment_inserted', catchmentId: id });
+        }
+      }
+    } catch (e) {
+      // Attach minimal context and bubble to error handler
+      e.context = { route: 'POST /catchments', phase: 'db_find_or_create', name, lat, lon };
+      throw e;
     }
+
     // Enqueue stage 1 explicitly (idempotent jobId)
-    await qCatchment.add(
-      'catchment',
-      { catchmentId: id, imageSource },
-      { jobId: `catchment:${id}` }
-    );
-    if (typeof req.log === 'function') {
-      req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+    try {
+      await qCatchment.add(
+        'catchment',
+        { catchmentId: id, imageSource },
+        { jobId: `catchment:${id}` }
+      );
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+      }
+      return res.status(202).json({ id });
+    } catch (e) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_enqueue_failed', catchmentId: id, jobId: `catchment:${id}`, name: e?.name, message: e?.message });
+      }
+      // Service unavailable: record exists but pipeline not started; client can retry/requeue
+      return res.status(503).json({ id, error: 'enqueue_failed' });
     }
-    return res.status(202).json({ id });
   } catch (err) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_request_error', name: err?.name, message: err?.message });
+    }
+    err.context = { ...(err.context || {}), route: 'POST /catchments' };
     next(err);
   }
 });

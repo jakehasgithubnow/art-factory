@@ -81,6 +81,7 @@ export function createApp() {
         name: err?.name,
         message: err?.message,
         stack: err?.stack,
+        context: err?.context || err?.extraContext,
       };
       console.error(JSON.stringify(payload));
     } catch (_) {

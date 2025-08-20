@@ -61,6 +61,8 @@ app/
     schema.sql
     stylePrompts.js
     systemPrompts.js
+  lib/
+    resilience.js
   queue/
     queues.js
     workers.js
@@ -94,6 +96,7 @@ app/
     cloudinary.js
     framemock.js
     google.js
+    imageRanker.js
     n8n.js
     openai.js
     openverse.js
@@ -172,6 +175,8 @@ export const env = {
 
   // Openverse (image search)
   openverseApiKey: optional('OPENVERSE_API_KEY'),
+  openverseUserAgent: optional('OPENVERSE_USER_AGENT'),
+  appContact: optional('APP_CONTACT'),
 
   // Cloudinary
   cloudName: optional('CLOUDINARY_CLOUD_NAME'),
@@ -535,6 +540,219 @@ export async function updatePrompt(key, text, enabled = true) {
 }
 
 ================
+File: app/lib/resilience.js
+================
+import IORedis from 'ioredis';
+import { env } from '../config/env.js';
+
+// Lightweight, dependency-free logger fallback
+function logSafe(event, extra = {}) {
+  try {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...extra }));
+  } catch {
+    // best-effort
+  }
+}
+
+// Singleton Redis connection for resilience utilities
+let _redis;
+function getRedis() {
+  if (_redis) return _redis;
+  _redis = new IORedis(env.redisUrl);
+  return _redis;
+}
+
+export class RetryableError extends Error {
+  constructor(message, meta = {}) {
+    super(message);
+    this.name = 'RetryableError';
+    this.retryable = true;
+    this.meta = meta;
+  }
+}
+
+export class CircuitOpenError extends Error {
+  constructor(message, meta = {}) {
+    super(message);
+    this.name = 'CircuitOpenError';
+    this.code = 'CIRCUIT_OPEN';
+    this.meta = meta;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function backoffDelay(attempt, base = 1000, max = 30000, jitter = true) {
+  const exp = Math.min(max, base * Math.pow(2, attempt));
+  if (!jitter) return exp;
+  // Full jitter
+  return Math.floor(Math.random() * exp);
+}
+
+function defaultClassify(err) {
+  // Explicit retryable
+  if (err && (err.retryable || err instanceof RetryableError)) return true;
+
+  const name = String(err?.name || '');
+  const code = String(err?.code || '');
+  const status = Number(err?.status || err?.statusCode);
+
+  // Abort/Timeout/Networkish errors are retryable
+  if (name === 'AbortError') return true;
+  if (/ECONNRESET|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN/i.test(code)) return true;
+
+  // Fetch may throw TypeError for network failures
+  if (name === 'TypeError' && /fetch|network/i.test(String(err?.message || ''))) return true;
+
+  // HTTP status-based: retry 408, 409 (sometimes), 425, 429, and 5xx
+  if (Number.isFinite(status)) {
+    if (status === 408 || status === 425 || status === 429) return true;
+    if (status === 409) return true;
+    if (status >= 500) return true;
+    // Other 4xx are considered non-retryable (auth/validation/etc.)
+    return false;
+  }
+
+  // Unknowns: be conservative and do not retry
+  return false;
+}
+
+/**
+ * Retry a function with exponential backoff and jitter.
+ * The function will be called as fn({ attempt, signal }) where:
+ *  - attempt starts at 0
+ *  - signal is an AbortSignal with per-attempt timeout applied
+ */
+export async function retryWithBackoff(fn, opts = {}) {
+  const {
+    retries = 2,
+    base = 1000,
+    max = 8000,
+    jitter = true,
+    timeoutMs = 300000, // 5 minutes default (matches PiAPI long tail)
+    classify = defaultClassify,
+    totalBudgetMs, // optional cap for total elapsed time
+    onAttempt, // optional hook: ({ attempt }) => void
+    onFail,    // optional hook: ({ attempt, err }) => void
+  } = opts;
+
+  const start = Date.now();
+  let lastErr;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (typeof onAttempt === 'function') {
+      try { onAttempt({ attempt }); } catch {}
+    }
+
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const result = await fn({ attempt, signal: controller.signal });
+      clearTimeout(to);
+      return result;
+    } catch (err) {
+      clearTimeout(to);
+      lastErr = err;
+
+      const retryable = classify(err);
+      if (!retryable || attempt === retries) {
+        if (typeof onFail === 'function') {
+          try { onFail({ attempt, err }); } catch {}
+        }
+        throw err;
+      }
+
+      const delay = backoffDelay(attempt, base, max, jitter);
+      const elapsed = Date.now() - start;
+      if (Number.isFinite(totalBudgetMs) && elapsed + delay > totalBudgetMs) {
+        // Exceeded total retry budget
+        throw err;
+      }
+
+      await sleep(delay);
+    }
+  }
+
+  // Should not reach here
+  throw lastErr || new Error('retryWithBackoff exhausted without an error');
+}
+
+/**
+ * Simple Redis-backed circuit breaker.
+ *
+ * Trips after minFailures within windowMs.
+ * When open, rejects immediately until cooldownMs elapses.
+ * On success, clears failures and closes the circuit.
+ */
+export async function withCircuitBreaker(key, fn, options = {}) {
+  const redis = getRedis();
+  const now = Date.now();
+
+  const {
+    minFailures = Number(process.env.PIAPI_CIRCUIT_MIN_FAILURES || 5),
+    windowMs   = Number(process.env.PIAPI_CIRCUIT_WINDOW_MS     || 60000),
+    cooldownMs = Number(process.env.PIAPI_CIRCUIT_COOLDOWN_MS   || 120000),
+    countAllFailures = false, // if true, count all errors; if false, only retryable
+    classify = defaultClassify,
+  } = options;
+
+  const openKey = `cb:${key}:open_until`;
+  const failKey = `cb:${key}:failures`;
+
+  // If circuit is currently open, fail fast
+  const openUntilRaw = await redis.get(openKey);
+  const openUntil = openUntilRaw ? parseInt(openUntilRaw, 10) : 0;
+  if (openUntil && openUntil > now) {
+    logSafe('circuit_rejected', { key, openUntil, remaining_ms: openUntil - now });
+    throw new CircuitOpenError(`Circuit '${key}' is open`, { key, openUntil });
+  }
+
+  try {
+    const res = await fn();
+    // Success: clear old failures and close circuit
+    try {
+      await redis.del(openKey);
+      await redis.del(failKey);
+      logSafe('circuit_closed', { key });
+    } catch {}
+    return res;
+  } catch (err) {
+    // Record a failure and possibly trip the circuit
+    const shouldCount = countAllFailures || classify(err);
+    if (shouldCount) {
+      try {
+        const ts = Date.now();
+        // Use ZSET of timestamps to maintain a sliding window
+        await redis.zadd(failKey, ts, String(ts));
+        await redis.zremrangebyscore(failKey, 0, ts - windowMs);
+        const count = await redis.zcard(failKey);
+
+        if (count >= minFailures) {
+          const until = ts + cooldownMs;
+          // Store open_until with PX so it auto-expires
+          await redis.set(openKey, String(until), 'PX', cooldownMs);
+          logSafe('circuit_open', { key, count, until, cooldownMs });
+        } else {
+          logSafe('circuit_failure_counted', { key, count });
+        }
+      } catch {}
+    } else {
+      logSafe('circuit_failure_ignored', { key, reason: 'non-retryable' });
+    }
+    throw err;
+  }
+}
+
+// Convenience exports for PiAPI use-cases
+export function classifyPiapiError(err) {
+  // Reuse default but allow easy override in callers
+  return defaultClassify(err);
+}
+
+================
 File: app/queue/queues.js
 ================
 import { Queue } from 'bullmq';
@@ -545,8 +763,8 @@ import { env } from '../config/env.js';
 const connection = new IORedis(env.redisUrl);
 
 // Sensible defaults with env overrides
-const ATTEMPTS = Number.parseInt(process.env.QUEUE_ATTEMPTS || '5', 10);
-const BACKOFF_MS = Number.parseInt(process.env.QUEUE_BACKOFF_MS || '1000', 10);
+const ATTEMPTS = Number.parseInt(process.env.QUEUE_ATTEMPTS ?? String(env.queue?.attempts ?? 8), 10);
+const BACKOFF_MS = Number.parseInt(process.env.QUEUE_BACKOFF_MS ?? String(env.queue?.backoffMs ?? 30000), 10);
 const REMOVE_ON_COMPLETE = process.env.QUEUE_REMOVE_ON_COMPLETE
   ? process.env.QUEUE_REMOVE_ON_COMPLETE === 'true'
   : true;
@@ -1380,7 +1598,7 @@ import { requireApiKey } from '../middleware/requireApiKey.js';
 
 const router = express.Router();
 
-// JSON for moderation grid
+// JSON for moderation grid (legacy: all photos for a catchment)
 router.get('/admin/photos', async (req, res, next) => {
   const t0 = Date.now();
   try {
@@ -1411,7 +1629,7 @@ router.get('/admin/photos', async (req, res, next) => {
         'p.openverse_metadata'
       )
       .where('l.catchment_id', catchmentId)
-      .orderBy('p.created_at','desc');
+      .orderBy('p.created_at', 'desc');
     if (typeof req.log === 'function') {
       req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
     }
@@ -1421,7 +1639,185 @@ router.get('/admin/photos', async (req, res, next) => {
   }
 });
 
-// Approve/Reject photo
+/**
+ * New: Get next location (within a catchment) that has photos requiring moderation,
+ * and return up to 20 unprocessed photos for that location.
+ */
+router.get('/admin/photos/next', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+
+    // Find the next location with at least one unprocessed photo
+    const loc = await db('locations as l')
+      .where('l.catchment_id', catchmentId)
+      .whereExists(function () {
+        this.select(1)
+          .from('photos as p')
+          .whereRaw('p.location_id = l.id')
+          .andWhere('p.processed', false);
+      })
+      .orderBy('l.created_at', 'asc')
+      .select('l.id', 'l.name')
+      .first();
+
+    if (!loc) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'admin_photos_next', catchmentId, done: true, duration_ms: Date.now() - t0 });
+      }
+      return res.json({ done: true });
+    }
+
+    // Up to 20 photos for this location that are not yet processed
+    const photos = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .orderBy('p.created_at', 'desc')
+      .limit(20)
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        // Openverse metadata columns as defined in schema (ov_*)
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      );
+
+    const remainingRow = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .count({ c: '*' })
+      .first();
+    const remaining = Number(remainingRow?.c ?? 0);
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'admin_photos_next',
+        catchmentId,
+        locationId: loc.id,
+        photos: photos.length,
+        remaining,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * New: Bulk moderation for all photos in a single location (approve/pass vs reject/fail),
+ * then enqueue approved ones for artwork generation. Requires API key.
+ * Body: { decisions: [{ id: photoId, kept: boolean }], catchmentId?: string }
+ */
+router.post('/moderate/location/:locationId', requireApiKey, async (req, res, next) => {
+  const t0 = Date.now();
+  const { locationId } = req.params;
+  const { decisions, catchmentId } = req.body || {};
+  try {
+    if (!Array.isArray(decisions) || decisions.length === 0) {
+      return res.status(400).json({ error: 'missing_decisions' });
+    }
+
+    // Normalize decisions into a map for quick lookup
+    const keepMap = new Map();
+    const ids = [];
+    for (const d of decisions) {
+      if (!d || !d.id) continue;
+      ids.push(d.id);
+      keepMap.set(d.id, Boolean(d.kept));
+    }
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'no_ids' });
+    }
+
+    // Ensure photos exist and belong to the provided location
+    const rows = await db('photos')
+      .whereIn('id', ids)
+      .andWhere({ location_id: locationId })
+      .select('id', 'src_url', 'cloudinary_id', 'secure_url');
+
+    const validIds = rows.map(r => r.id);
+    const approveIds = validIds.filter(id => keepMap.get(id) === true);
+    const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+
+    let uploadedToCloudinary = 0;
+    let enqueuedArtwork = 0;
+
+    // Rejects: mark kept=false, processed=true
+    if (rejectIds.length > 0) {
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+    }
+
+    // Approvals: kept=true, ensure Cloudinary upload present; then processed=true and enqueue artwork
+    if (approveIds.length > 0) {
+      // Set kept=true upfront
+      await db('photos').whereIn('id', approveIds).update({ kept: true });
+
+      // Upload missing Cloudinary assets
+      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
+      for (const p of needUpload) {
+        const { public_id, secure_url } = await uploadImage(p.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${p.id}`,
+          overwrite: false
+        });
+        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary++;
+      }
+
+      // Mark processed and enqueue artwork jobs
+      await db('photos').whereIn('id', approveIds).update({ processed: true });
+
+      await Promise.all(
+        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+      );
+      enqueuedArtwork = approveIds.length;
+    }
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'moderate_location',
+        locationId,
+        catchmentId: catchmentId || null,
+        approved: approveIds.length,
+        rejected: rejectIds.length,
+        uploadedToCloudinary,
+        enqueuedArtwork,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({
+      ok: true,
+      approved: approveIds.length,
+      rejected: rejectIds.length,
+      uploadedToCloudinary,
+      enqueuedArtwork
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Approve/Reject single photo (legacy granular moderation)
 router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
@@ -1449,7 +1845,7 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
       const { public_id, secure_url } = await uploadImage(photo.src_url, {
         folder: 'art-factory/source',
         publicId: `source_${photo.id}`,
-        overwrite: false,
+        overwrite: false
       });
       await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
       uploadedToCloudinary = true;
@@ -1459,7 +1855,14 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
     enqueuedArtwork = true;
     if (typeof req.log === 'function') {
-      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+      req.log({
+        event: 'moderate_photo',
+        photoId: id,
+        action: 'approve',
+        uploadedToCloudinary,
+        enqueuedArtwork,
+        duration_ms: Date.now() - t0
+      });
     }
     res.json({ ok: true, status: 'approved' });
   } catch (err) {
@@ -1476,7 +1879,7 @@ import express from 'express';
 
 const router = express.Router();
 
-// Moderation UI for photos
+// Moderation UI for photos - by location, 20 at a time, default pass, flip to fail, submit "Next"
 router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
   try {
@@ -1487,70 +1890,191 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Moderate Photos</title>
 <style>
-  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  :root{
+    --bg:#0b0d11;--panel:#151922;--border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;
+    --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1200px;margin:20px auto;padding:0 16px 88px}
   h1{font-size:18px;margin:12px 0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
-  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
-  .meta{padding:10px}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
-  .reject{background:#ef4444}
-  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
-  .muted{color:#9aa4b2}
+  .muted{color:var(--muted)}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  input{width:100%;max-width:420px;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
+  .card:hover{transform:translateY(-1px)}
+  .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
+  .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
+  .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
+  .badge.fail{background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.35)}
+  .card.fail .img{filter:grayscale(.6) contrast(.8) brightness(.9)}
+  .card.fail{outline-color:rgba(239,68,68,.5)}
+  .strike{position:absolute;inset:0;display:none;pointer-events:none}
+  .card.fail .strike{display:block}
+  .strike:before,.strike:after{content:"";position:absolute;left:10%;right:10%;top:50%;height:2px;background:rgba(239,68,68,.8)}
+  .strike:after{transform:rotate(90deg)}
+  .small{font-size:12px}
+  .cta{position:fixed;left:0;right:0;bottom:0;background:rgba(11,13,17,.9);backdrop-filter:saturate(120%) blur(10px);border-top:1px solid var(--border)}
+  .cta-inner{max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .btn{background:var(--btn);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}
+  .btn[disabled]{opacity:.6;cursor:not-allowed}
+  .counts{display:flex;gap:10px;align-items:center}
+  .pill{border:1px solid var(--border);border-radius:999px;padding:6px 10px}
+  .kpis{display:flex;gap:16px;align-items:center}
+  a.link{color:#8ab4ff;text-decoration:none}
+  .empty{padding:48px 16px;background:var(--panel);border:1px dashed var(--border);border-radius:12px;text-align:center}
 </style>
 <div class="wrap">
   <h1>Moderate Photos</h1>
-  <div class="muted">Catchment: ${catchmentId}</div>
-  <div style="max-width:420px;margin:10px 0">
+  <div class="row">
+    <div class="muted small">Catchment: ${catchmentId}</div>
+    <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
+  </div>
+  <div style="margin:10px 0">
     <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
   </div>
   <div id="grid" class="grid"></div>
+  <div id="done" class="empty" style="display:none">
+    <div style="font-weight:700;margin-bottom:6px">All locations reviewed</div>
+    <div class="muted">No more photos need moderation in this catchment.</div>
+  </div>
 </div>
+
+<div class="cta">
+  <div class="cta-inner">
+    <div class="kpis">
+      <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
+      <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+    </div>
+    <button id="nextBtn" class="btn">Next</button>
+  </div>
+</div>
+
 <script>
+const catchmentId = ${JSON.stringify(catchmentId)};
 const apiKeyInput = document.getElementById('apiKey');
 const grid = document.getElementById('grid');
-async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function load(){
-  const data = await json('/admin/photos?catchmentId=${catchmentId}');
-  grid.innerHTML = '';
-  for(const p of data.photos){
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = \`
-      <img class="img" src="\${p.src_url}" alt=""/>
-      <div class="meta">
-        <div class="row"><div>score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · kept: \${p.kept ? true : false} </div></div>
-        \${p.ov_id ? '<div class="row muted" style="font-size:12px;flex-direction:column;align-items:flex-start">'
-          + '<div><strong>Title:</strong> ' + (p.ov_title || '') + '</div>'
-          + '<div><strong>Creator:</strong> ' + (p.ov_creator || '') + '</div>'
-          + '<div><strong>License:</strong> ' + (p.ov_license || '') + ' ' + (p.ov_license_version || '') + '</div>'
-          + '<div><a href="' + (p.ov_license_url || '#') + '" target="_blank">License Link</a></div>'
-          + '<div><a href="' + (p.ov_detail_url || p.ov_source || '#') + '" target="_blank">Source</a></div>'
-          + '<div><strong>Dimensions:</strong> ' + (p.ov_width || '') + ' × ' + (p.ov_height || '') + '</div>'
-        + '</div>' : ''}
-        <div class="row">
-          <button data-act="approve" data-id="\${p.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
-        </div>
-      </div>\`;
-    grid.appendChild(card);
+const locNameEl = document.getElementById('locName');
+const remainingWrap = document.getElementById('remainingWrap');
+const remainingEl = document.getElementById('remaining');
+const passCountEl = document.getElementById('passCount');
+const failCountEl = document.getElementById('failCount');
+const nextBtn = document.getElementById('nextBtn');
+const doneEl = document.getElementById('done');
+
+let current = { location: null, photos: [] };
+
+async function j(url, opts={}) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function cardHTML(p) {
+  // default to PASS regardless of previous kept value
+  return \`
+  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="strike"></div>
+    <img class="img" src="\${p.src_url}" alt=""/>
+    <div class="meta">
+      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="badge pass">PASS</div>
+    </div>
+  </div>\`;
+}
+
+function render() {
+  if (!current.location) return;
+  locNameEl.textContent = current.location.name || '—';
+  grid.innerHTML = current.photos.map(cardHTML).join('');
+  doneEl.style.display = 'none';
+  // update counts (all pass by default)
+  updateCounts();
+}
+
+function updateCounts() {
+  const cards = Array.from(grid.querySelectorAll('.card'));
+  const fail = cards.filter(c => c.classList.contains('fail')).length;
+  const pass = cards.length - fail;
+  passCountEl.textContent = pass;
+  failCountEl.textContent = fail;
+}
+
+function setBadge(card) {
+  const badge = card.querySelector('.badge');
+  if (!badge) return;
+  if (card.classList.contains('fail')) {
+    badge.textContent = 'FAIL';
+    badge.classList.remove('pass');
+    badge.classList.add('fail');
+  } else {
+    badge.textContent = 'PASS';
+    badge.classList.remove('fail');
+    badge.classList.add('pass');
   }
 }
 
-grid.addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button');
-  if(!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  try{
-    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
-    await load();
-  }catch(e){ alert(e.message); }
+grid.addEventListener('click', (ev) => {
+  const card = ev.target.closest('.card');
+  if (!card) return;
+  // toggle fail on click
+  const willFail = !card.classList.contains('fail');
+  card.classList.toggle('fail', willFail);
+  setBadge(card);
+  updateCounts();
 });
 
-load();
+nextBtn.addEventListener('click', async () => {
+  if (!current.location) return;
+  try {
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Saving…';
+    // Build decisions for all visible photos
+    const decisions = current.photos.map(p => {
+      const el = document.getElementById('card-' + p.id);
+      const kept = el ? !el.classList.contains('fail') : true;
+      return { id: p.id, kept };
+    });
+    await fetch('/moderate/location/' + current.location.id, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKeyInput.value || ''
+      },
+      body: JSON.stringify({ decisions, catchmentId })
+    });
+    await loadNext();
+  } catch (e) {
+    alert(e.message || 'Save failed');
+  } finally {
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Next';
+  }
+});
+
+async function loadNext() {
+  locNameEl.textContent = '…';
+  passCountEl.textContent = '0';
+  failCountEl.textContent = '0';
+  grid.innerHTML = '';
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  if (data.done) {
+    current = { location: null, photos: [] };
+    remainingWrap.style.display = 'none';
+    doneEl.style.display = 'block';
+    return;
+  }
+  current = { location: data.location, photos: data.photos || [] };
+  remainingWrap.style.display = (typeof data.remaining === 'number') ? 'inline-flex' : 'none';
+  if (typeof data.remaining === 'number') remainingEl.textContent = data.remaining;
+  render();
+}
+
+loadNext();
 </script>
 </html>`);
   } catch (err) {
@@ -2168,6 +2692,266 @@ export async function getPlaceDetails(searchTerm) {
 }
 
 ================
+File: app/services/imageRanker.js
+================
+/**
+ * Heuristic image ranking utilities.
+ * Focus: fast, deterministic pre-ranking for Openverse results using only metadata.
+ * Designed to be used before any ML/LLM aesthetic scoring to reduce candidate set size.
+ */
+
+export function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function toLower(str) {
+  return typeof str === 'string' ? str.toLowerCase() : '';
+}
+
+function safeInt(n, def = 0) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : def;
+}
+
+function pixelsOf(img) {
+  const w = safeInt(img?.width, 0);
+  const h = safeInt(img?.height, 0);
+  return w * h;
+}
+
+function ratioOf(img) {
+  const w = safeInt(img?.width, 0);
+  const h = safeInt(img?.height, 0);
+  if (w <= 0 || h <= 0) return 0;
+  return w / h;
+}
+
+function normalizedResolutionScore(px) {
+  // Map 0.5MP..16MP to 0..1 (log scale)
+  const minPx = 0.5e6;
+  const maxPx = 16e6;
+  const v = Math.log10(Math.max(px, 1));
+  const minV = Math.log10(minPx);
+  const maxV = Math.log10(maxPx);
+  return clamp01((v - minV) / (maxV - minV));
+}
+
+function aspectClosenessScore(ratio, preferredRatios = [1.5, 1.777, 1.333]) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return 0;
+  let minRel = Infinity;
+  for (const pr of preferredRatios) {
+    if (!Number.isFinite(pr) || pr <= 0) continue;
+    const rel = Math.abs(ratio - pr) / pr;
+    if (rel < minRel) minRel = rel;
+  }
+  if (!Number.isFinite(minRel)) return 0;
+  const closeness = 1 - minRel; // 1 when exact match, decreases with distance
+  return clamp01(closeness * 1.2); // gentle boost
+}
+
+function makeAliases(query = '', extra = []) {
+  const q = toLower(query).trim();
+  const al = new Set(extra.map(toLower));
+  if (q) al.add(q);
+  // Light-weight special casing for a very common case
+  if (/\bnew york\b|\bnyc\b|\bmanhattan\b/.test(q)) {
+    [
+      'nyc',
+      'new york',
+      'manhattan',
+      'brooklyn',
+      'queens',
+      'bronx',
+      'staten island',
+      'times square',
+      'central park',
+      'empire state',
+      'one world trade',
+      'brooklyn bridge',
+      'manhattan skyline',
+    ].forEach(s => al.add(s));
+  }
+  return Array.from(al);
+}
+
+const DEFAULT_LICENSE_WEIGHTS = {
+  cc0: 0.06,
+  pdm: 0.06,
+  by: 0.04,
+  'by-sa': 0.03,
+  'by-nc': 0.0,
+  'by-nd': 0.0,
+  'by-nc-sa': 0.0,
+  'by-nc-nd': 0.0,
+};
+
+const DEFAULT_PROVIDER_WEIGHTS = {
+  flickr: 0.02,
+  // conservative defaults; add more empirically if desired
+  // 'stocksnap': 0.01,
+  // 'rawpixel': 0.01,
+};
+
+export const DEFAULT_RANK_OPTIONS = {
+  minWidth: 1200,
+  minHeight: 800,
+  extremeRatioMin: 0.3, // reject very tall
+  extremeRatioMax: 3.5, // reject very wide
+  preferredRatios: [1.5, 1.777, 1.333], // 3:2, 16:9, 4:3
+  orientationPreference: 'landscape', // 'landscape' | 'portrait' | null
+  orientationBonus: 0.05, // if matches preference
+  keywordAliases: [], // extra aliases, query is always included
+  keywordBonus: 0.04,
+  licenseWeights: DEFAULT_LICENSE_WEIGHTS,
+  providerWeights: DEFAULT_PROVIDER_WEIGHTS,
+};
+
+function keywordMatchBonus(title, query, aliases, bonus = 0.04) {
+  const t = toLower(title || '');
+  if (!t) return 0;
+  const all = makeAliases(query, aliases);
+  for (const a of all) {
+    if (a && t.includes(a)) return bonus;
+  }
+  return 0;
+}
+
+function licenseBonus(license, weights = DEFAULT_LICENSE_WEIGHTS) {
+  const k = toLower(license || '');
+  if (!k) return 0;
+  return Number(weights[k]) || 0;
+}
+
+function providerBonus(provider, weights = DEFAULT_PROVIDER_WEIGHTS) {
+  const k = toLower(provider || '');
+  if (!k) return 0;
+  return Number(weights[k]) || 0;
+}
+
+function orientationBonusOf(img, preference = 'landscape', bonus = 0.05) {
+  if (!preference) return 0;
+  const w = safeInt(img?.width, 0);
+  const h = safeInt(img?.height, 0);
+  if (w <= 0 || h <= 0) return 0;
+  const isLandscape = w >= h;
+  if (preference === 'landscape' && isLandscape) return bonus;
+  if (preference === 'portrait' && !isLandscape) return bonus;
+  return 0;
+}
+
+/**
+ * Compute heuristic score for an image based on metadata.
+ * Returns an object with granular subscores and final score.
+ */
+export function computeHeuristicScore(img, query, options = {}) {
+  const opts = { ...DEFAULT_RANK_OPTIONS, ...options };
+
+  const w = safeInt(img?.width, 0);
+  const h = safeInt(img?.height, 0);
+  const px = pixelsOf(img);
+  const ratio = ratioOf(img);
+
+  // Pre-filters (caller may also apply, but we reflect in debug)
+  const tooSmall = w < opts.minWidth || h < opts.minHeight;
+  const extreme = ratio > 0 ? (ratio < opts.extremeRatioMin || ratio > opts.extremeRatioMax) : true;
+
+  const resScore = normalizedResolutionScore(px);
+  const aspectScore = aspectClosenessScore(ratio, opts.preferredRatios);
+  const oBonus = orientationBonusOf(img, opts.orientationPreference, opts.orientationBonus);
+  const lBonus = licenseBonus(img?.license, opts.licenseWeights);
+  const pBonus = providerBonus(img?.provider, opts.providerWeights);
+  const kBonus = keywordMatchBonus(img?.title, query, opts.keywordAliases, opts.keywordBonus);
+
+  // Combine per documented weights
+  const score =
+    0.55 * resScore +
+    0.30 * aspectScore +
+    oBonus +
+    lBonus +
+    pBonus +
+    kBonus;
+
+  return {
+    score: clamp01(score),
+    resScore,
+    aspectScore,
+    orientationBonus: oBonus,
+    licenseBonus: lBonus,
+    providerBonus: pBonus,
+    keywordBonus: kBonus,
+    px,
+    ratio,
+    tooSmall,
+    extremeRatio: extreme,
+  };
+}
+
+/**
+ * Filter, score, and sort candidates.
+ * Returns array of enriched items: { ...img, heuristic: { score, ...debug } }
+ */
+export function rankAndTrim(images, query, options = {}, limit = images?.length || 0) {
+  if (!Array.isArray(images) || images.length === 0) return [];
+
+  const opts = { ...DEFAULT_RANK_OPTIONS, ...options };
+
+  // Deduplicate by normalized URL (lowercased)
+  const seen = new Set();
+  const deduped = [];
+  for (const img of images) {
+    const key = toLower(String(img?.url || ''));
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(img);
+  }
+
+  const scored = [];
+  for (const img of deduped) {
+    const debug = computeHeuristicScore(img, query, opts);
+    // Apply pre-filters
+    if (debug.tooSmall) continue;
+    if (debug.extremeRatio) continue;
+    scored.push({ img, debug });
+  }
+
+  scored.sort((a, b) => {
+    // Primary: heuristic score desc
+    if (b.debug.score !== a.debug.score) return b.debug.score - a.debug.score;
+    // Tie-break: pixels desc
+    if (b.debug.px !== a.debug.px) return b.debug.px - a.debug.px;
+    // Next: width desc
+    const aw = safeInt(a.img?.width, 0);
+    const bw = safeInt(b.img?.width, 0);
+    if (bw !== aw) return bw - aw;
+    // Stable fallback: lexical URL
+    const au = String(a.img?.url || '');
+    const bu = String(b.img?.url || '');
+    return au.localeCompare(bu);
+  });
+
+  const top = scored.slice(0, Math.max(0, limit));
+
+  // Attach heuristic info to returned objects
+  return top.map(({ img, debug }) => ({
+    ...img,
+    heuristic: {
+      score: debug.score,
+      resScore: debug.resScore,
+      aspectScore: debug.aspectScore,
+      orientationBonus: debug.orientationBonus,
+      licenseBonus: debug.licenseBonus,
+      providerBonus: debug.providerBonus,
+      keywordBonus: debug.keywordBonus,
+      px: debug.px,
+      ratio: debug.ratio,
+    },
+  }));
+}
+
+================
 File: app/services/n8n.js
 ================
 import axios from 'axios';
@@ -2202,6 +2986,7 @@ import { randomUUID } from 'crypto';
 import { log } from '../server/utils/logger.js';
 import { env } from '../config/env.js';
 import { enhanceError } from '../server/utils/error.js';
+import { withCircuitBreaker, retryWithBackoff, classifyPiapiError, RetryableError } from '../lib/resilience.js';
 
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
@@ -2212,6 +2997,7 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
+    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   try {
@@ -2219,7 +3005,9 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey}`,
+        Authorization: `Bearer ${/piapi\.ai/i.test(endpoint)
+          ? (process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY || env.openaiKey || process.env.OPENAI_API_KEY)
+          : (process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY)}`,
       },
       body: JSON.stringify({
         model,
@@ -2281,6 +3069,7 @@ export async function chatJson({
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
+    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   // Helper: tolerant JSON parse (tries to extract a balanced object/array if extra text slips in)
@@ -2322,10 +3111,12 @@ export async function chatJson({
     try {
       const resp = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey}`,
-        },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${/piapi\.ai/i.test(endpoint)
+              ? (process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY || env.openaiKey || process.env.OPENAI_API_KEY)
+              : (process.env.OPENAI_API_KEY || env.openaiKey || process.env.PIAPI_API_KEY || env.piapiKey || process.env.PAINT_API_KEY)}`,
+          },
         body: JSON.stringify({
           model,
           temperature,
@@ -2386,124 +3177,160 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
     env.paintEndpoint ||
     "https://api-direct.piapi.ai/v1/chat/completions";
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-      Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
-            { type: "text", text: prompt }
-          ]
+  // Retry/circuit config (override via env)
+  const retries = Number(process.env.PIAPI_RETRIES ?? 2);
+  const timeoutMs = Number(process.env.PIAPI_REQUEST_TIMEOUT_MS ?? 300000);
+  const base = Number(process.env.PIAPI_RETRY_BASE_MS ?? 1000);
+  const maxBackoff = Number(process.env.PIAPI_RETRY_MAX_MS ?? 8000);
+
+  const requestOnce = async ({ attempt, signal }) => {
+    log({ event: "generateImage_attempt", traceId, attempt });
+
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+              { type: "text", text: prompt }
+            ]
+          }
+        ],
+        stream: true,
+      }),
+      signal,
+    });
+
+    if (!resp.ok || !resp.body) {
+      const preview = await (async () => {
+        try { return await resp.text(); } catch { return ""; }
+      })();
+      log({ event: "generateImage_http_error", traceId, status: resp.status, preview: preview?.slice(0, 400) });
+      const e = new Error(`PiAPI request failed with status ${resp.status}`);
+      e.status = resp.status;
+      throw e;
+    }
+
+    let imageUrls = [];
+    const decoder = new TextDecoder();
+
+    function collectFromContentParts(parts, source) {
+      if (!Array.isArray(parts)) return;
+      for (const part of parts) {
+        // Standard image_url part
+        if (part?.type === "image_url" && part.image_url?.url) {
+          imageUrls.push(String(part.image_url.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
         }
-      ],
-      stream: true,
-    }),
-  });
-
-  if (!resp.ok || !resp.body) {
-    const preview = await (async () => {
-      try { return await resp.text(); } catch { return ""; }
-    })();
-    log({ event: "generateImage_http_error", traceId, status: resp.status, preview: preview?.slice(0, 400) });
-    throw new Error(`PiAPI request failed with status ${resp.status}`);
-  }
-
-  let imageUrls = [];
-  const decoder = new TextDecoder();
-
-  function collectFromContentParts(parts, source) {
-    if (!Array.isArray(parts)) return;
-    for (const part of parts) {
-      // Standard image_url part
-      if (part?.type === "image_url" && part.image_url?.url) {
-        imageUrls.push(String(part.image_url.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
-      }
-      // PiAPI/OpenAI output_image (URL-backed)
-      if (part?.type === "output_image" && part.source?.type === "url" && part.source?.url) {
-        imageUrls.push(String(part.source.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.source.url });
-      }
-      // Generic image part with url
-      if (part?.type === "image" && part.image_url?.url) {
-        imageUrls.push(String(part.image_url.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
-      }
-      // Base64 fallback (convert to data URL)
-      if (part?.type === "output_image" && part.b64_json) {
-        const dataUrl = `data:image/png;base64,${part.b64_json}`;
-        imageUrls.push(dataUrl);
-        log({ event: "generateImage_found_b64", traceId, source, length: part.b64_json.length });
+        // PiAPI/OpenAI output_image (URL-backed)
+        if (part?.type === "output_image" && part.source?.type === "url" && part.source?.url) {
+          imageUrls.push(String(part.source.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.source.url });
+        }
+        // Generic image part with url
+        if (part?.type === "image" && part.image_url?.url) {
+          imageUrls.push(String(part.image_url.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
+        }
+        // Base64 fallback (convert to data URL)
+        if (part?.type === "output_image" && part.b64_json) {
+          const dataUrl = `data:image/png;base64,${part.b64_json}`;
+          imageUrls.push(dataUrl);
+          log({ event: "generateImage_found_b64", traceId, source, length: part.b64_json.length });
+        }
       }
     }
-  }
 
-  // Robust SSE parsing: buffer until full events separated by \n\n
-  let buffer = "";
-  try {
-    for await (const chunk of resp.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let sepIndex;
-      while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-        const eventBlock = buffer.slice(0, sepIndex);
-        buffer = buffer.slice(sepIndex + 2);
+    // Robust SSE parsing: buffer until full events separated by \n\n
+    let buffer = "";
+    try {
+      for await (const chunk of resp.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let sepIndex;
+        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+          const eventBlock = buffer.slice(0, sepIndex);
+          buffer = buffer.slice(sepIndex + 2);
 
-        // Concatenate multi-line "data:" payloads
-        const dataLines = eventBlock
-          .split("\n")
-          .filter(l => l.startsWith("data:"))
-          .map(l => l.slice(5).trim());
+          // Concatenate multi-line "data:" payloads
+          const dataLines = eventBlock
+            .split("\n")
+            .filter(l => l.startsWith("data:"))
+            .map(l => l.slice(5).trim());
 
-        if (dataLines.length === 0) continue;
-        const dataStr = dataLines.join("\n");
-        if (dataStr === "[DONE]") continue;
+          if (dataLines.length === 0) continue;
+          const dataStr = dataLines.join("\n");
+          if (dataStr === "[DONE]") continue;
 
-        try {
-          log({ event: "generateImage_raw_chunk", traceId, preview: dataStr.slice(0, 300) });
-          const data = JSON.parse(dataStr);
+          try {
+            log({ event: "generateImage_raw_chunk", traceId, preview: dataStr.slice(0, 300) });
+            const data = JSON.parse(dataStr);
 
-          // Streaming deltas
-          collectFromContentParts(data?.choices?.[0]?.delta?.content, "delta");
-          // Final message (non-streaming end frame)
-          collectFromContentParts(data?.choices?.[0]?.message?.content, "message");
+            // Streaming deltas
+            collectFromContentParts(data?.choices?.[0]?.delta?.content, "delta");
+            // Final message (non-streaming end frame)
+            collectFromContentParts(data?.choices?.[0]?.message?.content, "message");
 
-          // Regex fallback
-          const str = JSON.stringify(data);
-          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
-          if (urlMatches) {
-            for (const u of urlMatches) {
-              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
-                imageUrls.push(u);
-                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
+            // Regex fallback
+            const str = JSON.stringify(data);
+            const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+            if (urlMatches) {
+              for (const u of urlMatches) {
+                if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
+                  imageUrls.push(u);
+                  log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
+                }
               }
             }
+          } catch (e) {
+            log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
           }
-        } catch (e) {
-          log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
         }
       }
+    } catch (err) {
+      log({ event: "generateImage_error", traceId, message: err?.message });
+      throw err;
     }
+
+    // Deduplicate & normalize
+    imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
+
+    log({ event: "generateImage_complete_attempt", traceId, attempt, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+    if (imageUrls.length === 0) {
+      throw new RetryableError("PiAPI stream did not include any image URLs", { attempt });
+    }
+    return imageUrls;
+  };
+
+  try {
+    const imageUrls = await withCircuitBreaker(
+      "piapi",
+      () =>
+        retryWithBackoff(requestOnce, {
+          retries,
+          base,
+          max: maxBackoff,
+          jitter: true,
+          timeoutMs,
+          classify: classifyPiapiError,
+          onAttempt: ({ attempt }) => log({ event: "piapi_retry_attempt", traceId, attempt }),
+          onFail: ({ attempt, err }) => log({ event: "piapi_retry_fail", traceId, attempt, message: err?.message }),
+        }),
+      { classify: classifyPiapiError }
+    );
+
+    log({ event: "generateImage_success", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+    return imageUrls;
   } catch (err) {
-    log({ event: "generateImage_error", traceId, message: err?.message });
     throw enhanceError(err, { stage: "generateImage", model });
   }
-
-  // Deduplicate & normalize
-  imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
-
-  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
-  if (imageUrls.length === 0) {
-    throw new Error("PiAPI stream did not include any image URLs");
-  }
-  return imageUrls;
 }
 
 ================
@@ -2512,73 +3339,175 @@ File: app/services/openverse.js
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
+import { rankAndTrim, DEFAULT_RANK_OPTIONS } from './imageRanker.js';
 
 const STAGE = 'openverse_image_search';
 function log(data = {}) {
   try {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      stage: STAGE,
-      ...data,
-    }));
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: STAGE,
+        ...data,
+      }),
+    );
   } catch (_) {
     // ignore logging errors
   }
 }
 
 /**
- * Search Openverse images.
+ * Search Openverse images, then apply a fast heuristic ranking to return the top-N.
  * Mirrors the interface of google.imageSearch for interchangeability.
+ *
  * @param {string} query - Search term.
- * @param {number} num - Number of results to return. Defaults to 10.
+ * @param {number} num - Number of results to return (after ranking). Defaults to 10.
+ * @param {object} options - Optional tuning:
+ *   - candidateSize: how many candidates to fetch before ranking (default: max(num*6, 40), capped by perPage*maxPages)
+ *   - perPage: page size for API requests (default 50)
+ *   - maxPages: maximum pages to fetch (default 5)
+ *   - rankOptions: options forwarded to the heuristic ranker (see DEFAULT_RANK_OPTIONS)
+ *   - disableRanking: if true, returns first 'num' results unranked (API order)
+ *   - openverseParams: extra params to include in the search (e.g., license, aspect_ratio, etc.)
  * @returns {Promise<Array<{url: string, context: string}>>}
  */
-export async function imageSearch(query, num = 10) {
+export async function imageSearch(query, num = 10, options = {}) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: 'start', traceId, query, num });
 
-  try {
-    const qs = new URLSearchParams({
-      q: query,
-      page_size: num.toString(),
-      page: '1'
-    });
+  const {
+    perPage = 50,
+    maxPages = 5,
+    disableRanking = false,
+    rankOptions = {},
+    openverseParams = {},
+  } = options || {};
 
-    const headers = {};
+  // Calculate fetch size (respect Openverse anonymous per-page limit of 20)
+  const hasKey = Boolean(env.openverseApiKey);
+  const target = Math.max(1, Number(num) || 10);
+  const defaultCandidate = Math.max(target * 6, 40);
+  const perPageLimit = hasKey ? perPage : Math.min(perPage, 20);
+  const hardCap = Math.max(1, perPageLimit * maxPages);
+  const candidateSize = Math.min(
+    Math.max(1, Number(options?.candidateSize) || defaultCandidate),
+    hardCap,
+  );
+
+  try {
+    const headers = {
+      Accept: 'application/json',
+      'User-Agent': env.openverseUserAgent || `art-factory/${process.env.npm_package_version || '0.0.0'} (+${env.appContact || 'https://github.com/jakehasgithubnow/art-factory'})`,
+    };
     if (env.openverseApiKey) {
       headers['Authorization'] = `Bearer ${env.openverseApiKey}`;
     }
 
-    const res = await fetch(`https://api.openverse.org/v1/images/?${qs}`, {
-      headers
+    const all = [];
+    let page = 1;
+    while (all.length < candidateSize && page <= maxPages) {
+      const pageSize = Math.min(perPageLimit, candidateSize - all.length);
+      const qs = new URLSearchParams({
+        q: String(query || ''),
+        page_size: String(pageSize),
+        page: String(page),
+        ...Object.fromEntries(
+          Object.entries(openverseParams || {}).flatMap(([k, v]) => {
+            if (v == null || v === '') return [];
+            const key = String(k).toLowerCase();
+            // Prevent overriding reserved params
+            if (key === 'q' || key === 'page' || key === 'page_size') return [];
+            return [[k, String(v)]];
+          }),
+        ),
+      });
+
+      const url = `https://api.openverse.org/v1/images/?${qs}`;
+      const res = await fetch(url, { headers });
+      log({ event: 'page_fetch', traceId, page, status: res.status, statusText: res.statusText });
+      if (!res.ok) {
+        let preview = '';
+        try { preview = await res.text(); } catch {}
+        log({ event: 'page_http_error', traceId, page, status: res.status, preview: String(preview).slice(0, 400) });
+        break;
+      }
+
+      let json;
+      try {
+        json = await res.json();
+      } catch (e) {
+        log({ event: 'page_parse_error', traceId, page, message: e?.message });
+        break;
+      }
+
+      const { results = [] } = json || {};
+      log({ event: 'page_result', traceId, page, count: Array.isArray(results) ? results.length : 0 });
+
+      if (!Array.isArray(results) || results.length === 0) {
+        break;
+      }
+
+      // Map Openverse fields to our common image object (preserve key metadata)
+      const mapped = results.map((i) => ({
+        url: i.url,
+        context: i.foreign_landing_url || null,
+        id: i.id,
+        title: i.title || null,
+        creator: i.creator || null,
+        creator_url: i.creator_url || null,
+        license: i.license || null,
+        license_version: i.license_version || null,
+        license_url: i.license_url || null,
+        source: i.source || null,
+        category: i.category || null,
+        provider: i.provider || null,
+        thumbnail: i.thumbnail || null,
+        detail_url: i.detail_url || null,
+        width: i.width || null,
+        height: i.height || null,
+      }));
+
+      all.push(...mapped);
+
+      // If the API returned fewer than requested, no more pages are likely available
+      if (results.length < pageSize) break;
+      page += 1;
+    }
+
+    log({
+      event: 'fetched',
+      traceId,
+      pages_fetched: page - 1,
+      candidate_count: all.length,
+      duration_ms: Date.now() - start,
     });
 
-    log({ event: 'fetched', traceId, status: res.status, statusText: res.statusText });
+    if (all.length === 0) return [];
 
-    const { results = [] } = await res.json();
+    if (disableRanking) {
+      const sliced = all.slice(0, target);
+      log({
+        event: 'return_unranked',
+        traceId,
+        count: sliced.length,
+        reason: 'disableRanking',
+      });
+      return sliced;
+    }
 
-    log({ event: 'success', traceId, count: results.length, duration_ms: Date.now() - start });
+    // Rank and trim to top-N using heuristics
+    const ranked = rankAndTrim(all, query, { ...DEFAULT_RANK_OPTIONS, ...rankOptions }, target);
 
-    // Map Openverse fields to match Google style objects, but include all metadata
-    return results.map(i => ({
-      url: i.url,
-      context: i.foreign_landing_url || null,
-      id: i.id,
-      title: i.title || null,
-      creator: i.creator || null,
-      creator_url: i.creator_url || null,
-      license: i.license || null,
-      license_version: i.license_version || null,
-      license_url: i.license_url || null,
-      source: i.source || null,
-      category: i.category || null,
-      provider: i.provider || null,
-      thumbnail: i.thumbnail || null,
-      detail_url: i.detail_url || null,
-      width: i.width || null,
-      height: i.height || null
-    }));
+    log({
+      event: 'success_ranked',
+      traceId,
+      candidate_count: all.length,
+      top_count: ranked.length,
+      duration_ms: Date.now() - start,
+    });
+
+    return ranked;
   } catch (err) {
     log({ event: 'error', traceId, name: err?.name, message: err?.message });
     throw err;
@@ -3012,11 +3941,8 @@ export default async function artwork(job) {
       }
     }
 
-    if (res && typeof res.status !== "undefined") {
-      console.log(`[artwork] Paint service response status: ${res.status}`);
-    } else {
-      console.log("[artwork] Skipping status log (no new response object)");
-    }
+    // Exit after per-style processing to avoid legacy duplicate flow
+    return;
 
     if (usePiapi) {
       // --- RETRY LOGIC for PiAPI ---
@@ -3432,8 +4358,9 @@ import { chat } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
 
-const KEEP_THRESHOLD = 0.65;
-const MAX_IMAGES = 10; // keep requests small; page inside imageSearch if needed
+const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
+const OPENVERSE_TOP_N = 20;
+const GOOGLE_TOP_N = 10;
 
 function clamp01(n) {
   if (!Number.isFinite(n)) return 0;
@@ -3442,18 +4369,33 @@ function clamp01(n) {
   return n;
 }
 
+function to01(text) {
+  const s = String(text || '').trim();
+  // If it's a strict single char 0/1, use it directly
+  if (/^[01]$/.test(s)) return Number(s);
+  // If it's a numeric string like 0.65, parse and threshold at 0.5
+  const num = Number.parseFloat(s);
+  if (Number.isFinite(num)) return num >= 0.5 ? 1 : 0;
+  // Fallback: look for any 0/1 digit hints; prefer '1' if clearly present
+  const digits = s.match(/[01]/g);
+  if (digits && digits.length) return digits.includes('1') && !digits.every(d => d === '0') ? 1 : 0;
+  // Default conservative: delete
+  return 0;
+}
+
 export default async function photos(job) {
   const { locationId } = job.data;
   const location = await db('locations').where({ id: locationId }).first();
   if (!location || location.processed) return;
 
+  const source = location.image_source || 'google';
+
   let images = [];
   try {
-    const source = location.image_source || 'google';
     if (source === 'openverse') {
-      images = await openverseImageSearch(location.search_term, MAX_IMAGES);
+      images = await openverseImageSearch(location.search_term, OPENVERSE_TOP_N);
     } else {
-      images = await googleImageSearch(location.search_term, MAX_IMAGES);
+      images = await googleImageSearch(location.search_term, GOOGLE_TOP_N);
     }
   } catch (err) {
     console.error('photos: imageSearch failed', { locationId, err });
@@ -3469,89 +4411,175 @@ export default async function photos(job) {
     const srcUrl = img?.url || img?.src || '';
     if (!srcUrl) continue;
 
-    // 1) Ask GPT to score (best-effort; never throw the worker)
-    let score = 0;
+    // Load prompts once per image (kept here for simplicity)
+    let sysPrompt = '';
+    let userTemplate = '';
     try {
       const { getByKey } = await import('../db/systemPrompts.js');
       const sysPromptRow = await getByKey('photo_scoring_system');
-      const sysPrompt = sysPromptRow?.text;
+      sysPrompt = sysPromptRow?.text || '';
       const userPromptRow = await getByKey('photo_scoring_user');
-      const userTemplate = userPromptRow?.text;
-      const userPrompt = userTemplate?.replace('{{imageUrl}}', srcUrl);
-      const scoreTxt = await chat(
-        sysPrompt,
-        userPrompt,
-        0
-      );
-      score = clamp01(Number(scoreTxt));
+      userTemplate = userPromptRow?.text || '';
     } catch (err) {
-      console.warn('photos: scoring failed; defaulting to 0', { locationId, srcUrl, err });
-      score = 0;
+      console.warn('photos: failed to load system/user prompts; defaulting', { locationId, err });
+      sysPrompt = '';
+      userTemplate = '';
     }
 
-    const kept = score >= KEEP_THRESHOLD;
-
-    // 2) Insert photo row idempotently
-    let photoRow;
-    try {
-      const insertData = { location_id: locationId, src_url: srcUrl, score, kept };
-
-      // If this is from Openverse, store the metadata fields
-      if (img.id) {
-        insertData.openverse_id = img.id || null;
-        insertData.title = img.title || null;
-        insertData.creator = img.creator || null;
-        insertData.creator_url = img.creator_url || null;
-        insertData.license = img.license || null;
-        insertData.license_version = img.license_version || null;
-        insertData.license_url = img.license_url || null;
-        insertData.source = img.source || null;
-        insertData.category = img.category || null;
-        insertData.provider = img.provider || null;
-        insertData.thumbnail_url = img.thumbnail || null;
-        insertData.detail_url = img.detail_url || null;
-        insertData.width = img.width || null;
-        insertData.height = img.height || null;
-        insertData.openverse_metadata = img || {};
-      }
-
-      const insert = await db('photos')
-        .insert(insertData)
-        .onConflict(['location_id', 'src_url'])
-        .ignore()
-        .returning(['id']);
-
-      if (insert && insert[0]) {
-        photoRow = { id: insert[0].id };
-      } else {
-        photoRow = await db('photos')
-          .where({ location_id: locationId, src_url: srcUrl })
-          .first(['id', 'cloudinary_id', 'secure_url', 'processed', 'kept']);
-      }
-    } catch (err) {
-      console.warn('photos: failed to upsert photo row', { locationId, srcUrl, err });
-      continue;
-    }
-
-    if (!photoRow?.id) continue;
-
-    // 3) If we decided to keep it, mark for moderation but do not upload or enqueue yet
-    if (kept) {
+    if (source === 'openverse') {
+      // OPENVERSE PATH: store top 20, then classify with GPT using thumbnail; delete if 0, keep if 1
+      let photoRow;
       try {
-        // Mark as kept but leave processed false for moderation to handle
-        if (!photoRow.processed) {
-          await db('photos').where({ id: photoRow.id }).update({
-            kept: true,
-            processed: false,
-          });
+        const insertData = {
+          location_id: locationId,
+          src_url: srcUrl,
+          kept: false,
+          score: null,
+        };
+
+        // Persist Openverse metadata if present
+        if (img.id) {
+          insertData.openverse_id = img.id || null;
+          insertData.title = img.title || null;
+          insertData.creator = img.creator || null;
+          insertData.creator_url = img.creator_url || null;
+          insertData.license = img.license || null;
+          insertData.license_version = img.license_version || null;
+          insertData.license_url = img.license_url || null;
+          insertData.source = img.source || null;
+          insertData.category = img.category || null;
+          insertData.provider = img.provider || null;
+          insertData.thumbnail_url = img.thumbnail || null;
+          insertData.detail_url = img.detail_url || null;
+          insertData.width = img.width || null;
+          insertData.height = img.height || null;
+          insertData.openverse_metadata = img || {};
+        }
+
+        const insert = await db('photos')
+          .insert(insertData)
+          .onConflict(['location_id', 'src_url'])
+          .ignore()
+          .returning(['id']);
+
+        if (insert && insert[0]) {
+          photoRow = { id: insert[0].id };
+        } else {
+          photoRow = await db('photos')
+            .where({ location_id: locationId, src_url: srcUrl })
+            .first(['id', 'cloudinary_id', 'secure_url', 'processed', 'kept']);
         }
       } catch (err) {
-        console.error('photos: marking for moderation failed', { locationId, photoId: photoRow.id, err });
+        console.warn('photos: failed to upsert photo row (openverse)', { locationId, srcUrl, err });
+        continue;
+      }
+
+      if (!photoRow?.id) continue;
+
+      // Build user payload: use thumbnail when available; fall back to srcUrl
+      const thumbUrl = img?.thumbnail || img?.thumbnail_url || srcUrl;
+      const userText = typeof userTemplate === 'string'
+        ? userTemplate.replace('{{imageUrl}}', thumbUrl)
+        : '';
+
+      // Classify with gpt-4.1-mini: expect '0' or '1'
+      let keep = 0;
+      try {
+        const sysForBinary = (typeof sysPrompt === 'string' && sysPrompt.trim())
+          ? `${sysPrompt}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
+          : 'Return ONLY a single character: 1 (keep) or 0 (delete).';
+        const result = await chat(
+          sysForBinary,
+          { imageUrls: [thumbUrl], text: userText },
+          0,
+          'gpt-4.1-mini'
+        );
+        keep = to01(result);
+      } catch (err) {
+        console.warn('photos: openverse classification failed; defaulting to 0 (delete)', { locationId, srcUrl, err });
+        keep = 0;
+      }
+
+      try {
+        if (keep === 1) {
+          // Keep photo: mark for moderation (processed stays false)
+          if (!photoRow.processed) {
+            await db('photos').where({ id: photoRow.id }).update({
+              kept: true,
+              processed: false,
+              score: 1,
+            });
+          }
+          console.log('photos: kept openverse photo', { locationId, photoId: photoRow.id, srcUrl });
+        } else {
+          // Delete photo row entirely
+          await db('photos').where({ id: photoRow.id }).del();
+          console.log('photos: deleted openverse photo (classified 0)', { locationId, photoId: photoRow.id, srcUrl });
+        }
+      } catch (err) {
+        console.error('photos: openverse post-classification update failed', { locationId, photoId: photoRow.id, err });
+      }
+    } else {
+      // NON-OPENVERSE PATH: keep existing behavior (score numeric, threshold)
+      let score = 0;
+      try {
+        const userPrompt = typeof userTemplate === 'string'
+          ? userTemplate.replace('{{imageUrl}}', srcUrl)
+          : '';
+        const scoreTxt = await chat(
+          sysPrompt,
+          userPrompt,
+          0
+        );
+        score = clamp01(Number(scoreTxt));
+      } catch (err) {
+        console.warn('photos: scoring failed; defaulting to 0', { locationId, srcUrl, err });
+        score = 0;
+      }
+
+      const kept = score >= KEEP_THRESHOLD;
+
+      // Upsert and mark kept (idempotent)
+      let photoRow;
+      try {
+        const insertData = { location_id: locationId, src_url: srcUrl, score, kept };
+
+        const insert = await db('photos')
+          .insert(insertData)
+          .onConflict(['location_id', 'src_url'])
+          .ignore()
+          .returning(['id']);
+
+        if (insert && insert[0]) {
+          photoRow = { id: insert[0].id };
+        } else {
+          photoRow = await db('photos')
+            .where({ location_id: locationId, src_url: srcUrl })
+            .first(['id', 'cloudinary_id', 'secure_url', 'processed', 'kept']);
+        }
+      } catch (err) {
+        console.warn('photos: failed to upsert photo row (non-openverse)', { locationId, srcUrl, err });
+        continue;
+      }
+
+      if (!photoRow?.id) continue;
+
+      if (kept) {
+        try {
+          if (!photoRow.processed) {
+            await db('photos').where({ id: photoRow.id }).update({
+              kept: true,
+              processed: false,
+            });
+          }
+        } catch (err) {
+          console.error('photos: marking for moderation failed', { locationId, photoId: photoRow.id, err });
+        }
       }
     }
   }
 
-  // 4) Mark location processed after iterating all images
+  // Mark location processed after iterating all images
   await db('locations').where({ id: locationId }).update({ processed: true });
 }
 
@@ -3799,7 +4827,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- Moderation UI ----------
+// ---------- Moderation UI (Photos by Location: up to 20 images, default PASS, toggle FAIL, Next) ----------
 app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
   try {
@@ -3810,69 +4838,436 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Moderate Photos</title>
 <style>
-  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  :root{
+    --bg:#0b0d11;--panel:#151922;--border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;
+    --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1200px;margin:20px auto;padding:0 16px 88px}
   h1{font-size:18px;margin:12px 0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
-  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
-  .meta{padding:10px}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
-  .reject{background:#ef4444}
-  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
-  .muted{color:#9aa4b2}
+  .muted{color:var(--muted)}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  input{width:100%;max-width:420px;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
+  .card:hover{transform:translateY(-1px)}
+  .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
+  .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
+  .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
+  .badge.fail{background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.35)}
+  .card.fail .img{filter:grayscale(.6) contrast(.8) brightness(.9)}
+  .card.fail{outline-color:rgba(239,68,68,.5)}
+  .strike{position:absolute;inset:0;display:none;pointer-events:none}
+  .card.fail .strike{display:block}
+  .strike:before,.strike:after{content:"";position:absolute;left:10%;right:10%;top:50%;height:2px;background:rgba(239,68,68,.8)}
+  .strike:after{transform:rotate(90deg)}
+  .small{font-size:12px}
+  .cta{position:fixed;left:0;right:0;bottom:0;background:rgba(11,13,17,.9);backdrop-filter:saturate(120%) blur(10px);border-top:1px solid var(--border)}
+  .cta-inner{max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .btn{background:var(--btn);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}
+  .btn[disabled]{opacity:.6;cursor:not-allowed}
+  .counts{display:flex;gap:10px;align-items:center}
+  .pill{border:1px solid var(--border);border-radius:999px;padding:6px 10px}
+  .kpis{display:flex;gap:16px;align-items:center}
+  a.link{color:#8ab4ff;text-decoration:none}
+  .empty{padding:48px 16px;background:var(--panel);border:1px dashed var(--border);border-radius:12px;text-align:center}
 </style>
 <div class="wrap">
   <h1>Moderate Photos</h1>
-  <div class="muted">Catchment: ${catchmentId}</div>
-  <div style="max-width:420px;margin:10px 0">
+  <div class="row">
+    <div class="muted small">Catchment: ${catchmentId}</div>
+    <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
+  </div>
+  <div style="margin:10px 0">
     <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
   </div>
   <div id="grid" class="grid"></div>
+  <div id="done" class="empty" style="display:none">
+    <div style="font-weight:700;margin-bottom:6px">All locations reviewed</div>
+    <div class="muted">No more photos need moderation in this catchment.</div>
+  </div>
 </div>
+
+<div class="cta">
+  <div class="cta-inner">
+    <div class="kpis">
+      <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
+      <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+    </div>
+    <button id="nextBtn" class="btn">Next</button>
+  </div>
+</div>
+
 <script>
+const catchmentId = ${JSON.stringify(catchmentId)};
 const apiKeyInput = document.getElementById('apiKey');
 const grid = document.getElementById('grid');
-async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function load(){
-  const data = await json('/admin/photos?catchmentId=${catchmentId}');
-  grid.innerHTML = '';
-  for(const p of data.photos){
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = \`
-      <img class="img" src="\${p.src_url}" alt=""/>
-      <div class="meta">
-        <div class="small muted"><b>\${p.title || ''}</b> \${p.creator ? '— ' + p.creator : ''}</div>
-        <div class="small muted">License: \${p.license || ''} \${p.license_version || ''}</div>
-        <div class="small muted">Source: \${p.source || ''} \${p.provider ? '('+p.provider+')' : ''}</div>
-        <div class="small muted">Dims: \${p.width||''}×\${p.height||''}</div>
-        <div class="small muted"><a href="\${p.detail_url||'#'}" target="_blank">Details</a> · <a href="\${p.creator_url||'#'}" target="_blank">Creator</a></div>
-        <div class="row"><div>Score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · Kept: \${p.kept ? true : false}</div></div>
-        <div class="row">
-          <button data-act="approve" data-id="\${p.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
-        </div>
-      </div>\`;
-    grid.appendChild(card);
+const locNameEl = document.getElementById('locName');
+const remainingWrap = document.getElementById('remainingWrap');
+const remainingEl = document.getElementById('remaining');
+const passCountEl = document.getElementById('passCount');
+const failCountEl = document.getElementById('failCount');
+const nextBtn = document.getElementById('nextBtn');
+const doneEl = document.getElementById('done');
+
+let current = { location: null, photos: [] };
+
+async function j(url, opts={}) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function cardHTML(p) {
+  // default to PASS regardless of previous kept value
+  return \`
+  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="strike"></div>
+    <img class="img" src="\${p.src_url}" alt=""/>
+    <div class="meta">
+      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="badge pass">PASS</div>
+    </div>
+  </div>\`;
+}
+
+function render() {
+  if (!current.location) return;
+  locNameEl.textContent = current.location.name || '—';
+  grid.innerHTML = current.photos.map(cardHTML).join('');
+  doneEl.style.display = 'none';
+  updateCounts();
+}
+
+function updateCounts() {
+  const cards = Array.from(grid.querySelectorAll('.card'));
+  const fail = cards.filter(c => c.classList.contains('fail')).length;
+  const pass = cards.length - fail;
+  passCountEl.textContent = pass;
+  failCountEl.textContent = fail;
+}
+
+function setBadge(card) {
+  const badge = card.querySelector('.badge');
+  if (!badge) return;
+  if (card.classList.contains('fail')) {
+    badge.textContent = 'FAIL';
+    badge.classList.remove('pass');
+    badge.classList.add('fail');
+  } else {
+    badge.textContent = 'PASS';
+    badge.classList.remove('fail');
+    badge.classList.add('pass');
   }
 }
 
-grid.addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button');
-  if(!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  try{
-    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
-    await load();
-  }catch(e){ alert(e.message); }
+grid.addEventListener('click', (ev) => {
+  const card = ev.target.closest('.card');
+  if (!card) return;
+  const willFail = !card.classList.contains('fail');
+  card.classList.toggle('fail', willFail);
+  setBadge(card);
+  updateCounts();
 });
 
-load();
+nextBtn.addEventListener('click', async () => {
+  if (!current.location) return;
+  try {
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Saving…';
+    const decisions = current.photos.map(p => {
+      const el = document.getElementById('card-' + p.id);
+      const kept = el ? !el.classList.contains('fail') : true;
+      return { id: p.id, kept };
+    });
+    await fetch('/moderate/location/' + current.location.id, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKeyInput.value || ''
+      },
+      body: JSON.stringify({ decisions, catchmentId })
+    });
+    await loadNext();
+  } catch (e) {
+    alert(e.message || 'Save failed');
+  } finally {
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Next';
+  }
+});
+
+async function loadNext() {
+  locNameEl.textContent = '…';
+  passCountEl.textContent = '0';
+  failCountEl.textContent = '0';
+  grid.innerHTML = '';
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  if (data.done) {
+    current = { location: null, photos: [] };
+    remainingWrap.style.display = 'none';
+    doneEl.style.display = 'block';
+    return;
+  }
+  current = { location: data.location, photos: data.photos || [] };
+  remainingWrap.style.display = (typeof data.remaining === 'number') ? 'inline-flex' : 'none';
+  if (typeof data.remaining === 'number') remainingEl.textContent = data.remaining;
+  render();
+}
+
+loadNext();
 </script>
 </html>`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Photos API for moderation (legacy: full list) ----------
+app.get('/admin/photos', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
+      .where('l.catchment_id', catchmentId)
+      .orderBy('p.created_at', 'desc');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({ photos: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- New: Fetch next location with up to 20 unprocessed photos ----------
+app.get('/admin/photos/next', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+
+    const loc = await db('locations as l')
+      .where('l.catchment_id', catchmentId)
+      .whereExists(function () {
+        this.select(1)
+          .from('photos as p')
+          .whereRaw('p.location_id = l.id')
+          .andWhere('p.processed', false);
+      })
+      .orderBy('l.created_at', 'asc')
+      .select('l.id', 'l.name')
+      .first();
+
+    if (!loc) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'admin_photos_next', catchmentId, done: true, duration_ms: Date.now() - t0 });
+      }
+      return res.json({ done: true });
+    }
+
+    const photos = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .orderBy('p.created_at', 'desc')
+      .limit(20)
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      );
+
+    const remainingRow = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .count({ c: '*' })
+      .first();
+    const remaining = Number(remainingRow?.c ?? 0);
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'admin_photos_next',
+        catchmentId,
+        locationId: loc.id,
+        photos: photos.length,
+        remaining,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Legacy single-photo moderation ----------
+app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const action = (req.body?.action || '').toString();
+  const t0 = Date.now();
+  let uploadedToCloudinary = false;
+  let enqueuedArtwork = false;
+  try {
+    const photo = await db('photos').where({ id }).first();
+    if (!photo) return res.status(404).json({ error: 'not_found' });
+
+    if (action === 'reject') {
+      await db('photos').where({ id }).update({ kept: false, processed: true });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      }
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
+
+    await db('photos').where({ id }).update({ kept: true });
+
+    if (!photo.cloudinary_id || !photo.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photo.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photo.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+      uploadedToCloudinary = true;
+    }
+
+    await db('photos').where({ id }).update({ processed: true });
+    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
+    enqueuedArtwork = true;
+    if (typeof req.log === 'function') {
+      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+    }
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- New: Bulk moderation for a location (pass/fail) ----------
+app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next) => {
+  const t0 = Date.now();
+  const { locationId } = req.params;
+  const { decisions, catchmentId } = req.body || {};
+  try {
+    if (!Array.isArray(decisions) || decisions.length === 0) {
+      return res.status(400).json({ error: 'missing_decisions' });
+    }
+
+    const keepMap = new Map();
+    const ids = [];
+    for (const d of decisions) {
+      if (!d || !d.id) continue;
+      ids.push(d.id);
+      keepMap.set(d.id, Boolean(d.kept));
+    }
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'no_ids' });
+    }
+
+    const rows = await db('photos')
+      .whereIn('id', ids)
+      .andWhere({ location_id: locationId })
+      .select('id', 'src_url', 'cloudinary_id', 'secure_url');
+
+    const validIds = rows.map(r => r.id);
+    const approveIds = validIds.filter(id => keepMap.get(id) === true);
+    const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+
+    let uploadedToCloudinary = 0;
+    let enqueuedArtwork = 0;
+
+    if (rejectIds.length > 0) {
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+    }
+
+    if (approveIds.length > 0) {
+      await db('photos').whereIn('id', approveIds).update({ kept: true });
+
+      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
+      for (const p of needUpload) {
+        const { public_id, secure_url } = await uploadImage(p.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${p.id}`,
+          overwrite: false
+        });
+        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary++;
+      }
+
+      await db('photos').whereIn('id', approveIds).update({ processed: true });
+
+      await Promise.all(
+        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+      );
+      enqueuedArtwork = approveIds.length;
+    }
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'moderate_location',
+        locationId,
+        catchmentId: catchmentId || null,
+        approved: approveIds.length,
+        rejected: rejectIds.length,
+        uploadedToCloudinary,
+        enqueuedArtwork,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({
+      ok: true,
+      approved: approveIds.length,
+      rejected: rejectIds.length,
+      uploadedToCloudinary,
+      enqueuedArtwork
+    });
   } catch (err) {
     next(err);
   }
@@ -3949,48 +5344,7 @@ load();
   } catch (err) { next(err); }
 });
 
-// JSON for moderation grid
-app.get('/admin/photos', async (req, res, next) => {
-  const t0 = Date.now();
-  try {
-    const { catchmentId } = req.query;
-    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
-    const rows = await db('photos as p')
-      .join('locations as l', 'l.id', 'p.location_id')
-      .select(
-        'p.id',
-        'p.src_url',
-        'p.kept',
-        'p.score',
-        'p.processed',
-        'p.openverse_id',
-        'p.title',
-        'p.creator',
-        'p.creator_url',
-        'p.license',
-        'p.license_version',
-        'p.license_url',
-        'p.source',
-        'p.category',
-        'p.provider',
-        'p.thumbnail_url',
-        'p.detail_url',
-        'p.width',
-        'p.height',
-        'p.openverse_metadata'
-      )
-      .where('l.catchment_id', catchmentId)
-      .orderBy('p.created_at','desc');
-    if (typeof req.log === 'function') {
-      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
-    }
-    res.json({ photos: rows });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// List artworks for moderation (pending by default)
+// ---------- List artworks for moderation ----------
 app.get('/admin/artworks', async (req, res, next) => {
   const t0 = Date.now();
   try {
@@ -4021,53 +5375,7 @@ app.get('/admin/artworks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Approve/Reject photo
-app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
-  const { id } = req.params;
-  const action = (req.body?.action || '').toString();
-  const t0 = Date.now();
-  let uploadedToCloudinary = false;
-  let enqueuedArtwork = false;
-  try {
-    const photo = await db('photos').where({ id }).first();
-    if (!photo) return res.status(404).json({ error: 'not_found' });
-
-    if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
-      if (typeof req.log === 'function') {
-        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
-      }
-      return res.json({ ok: true, status: 'rejected' });
-    }
-
-    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
-
-    // Approve: mark kept, ensure upload, then enqueue artwork
-    await db('photos').where({ id }).update({ kept: true });
-
-    if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false,
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
-    }
-
-    await db('photos').where({ id }).update({ processed: true });
-    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
-    enqueuedArtwork = true;
-    if (typeof req.log === 'function') {
-      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
-    }
-    res.json({ ok: true, status: 'approved' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Moderate generated artwork (approve => enqueue publish, reject => mark only)
+// ---------- Moderate generated artwork ----------
 app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const { action } = req.body || {};
@@ -4087,7 +5395,6 @@ app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
     res.json({ ok: true, status: 'approved' });
   } catch (err) { next(err); }
 });
-
 
 // ---------- Operator UI (no build step) ----------
 app.get('/', (_req, res) => {
@@ -4520,6 +5827,7 @@ app.get('/admin/recent', async (_req, res, next) => {
   }
 });
 
+// Mount admin style prompts UIs
 app.use('/admin/style-prompts', (await import('./server/routes/admin/stylePrompts.js')).default);
 app.use('/', (await import('./server/routes/admin/stylePromptsUI.js')).default);
 
@@ -4733,7 +6041,7 @@ In essence, the application automates the entire process from defining a geograp
     FRAME_MOCK_URL=...
 
     # Paint-API (PiAPI) — for generating the AI paintings
-    PAINT_API_URL=...
+    PAINT_ENDPOINT=...
     PAINT_API_KEY=...
 
     # Shopify
@@ -4746,6 +6054,34 @@ In essence, the application automates the entire process from defining a geograp
     # Optional: custom port (defaults to 3000)
     PORT=3003
     ```
+
+### Resilience and Queue Backoff
+
+The app now includes centralized resilience for PiAPI calls:
+- Circuit breaker (Redis-backed) to avoid hammering a down service
+- Exponential backoff with jitter and per-attempt timeouts
+- Queue-level exponential backoff for long outages
+
+Optional environment variables (with defaults):
+
+- Queue (BullMQ):
+  - QUEUE_ATTEMPTS=8
+  - QUEUE_BACKOFF_MS=30000
+
+- Circuit breaker:
+  - PIAPI_CIRCUIT_MIN_FAILURES=5
+  - PIAPI_CIRCUIT_WINDOW_MS=60000
+  - PIAPI_CIRCUIT_COOLDOWN_MS=120000
+
+- Request retry:
+  - PIAPI_RETRIES=2
+  - PIAPI_RETRY_BASE_MS=1000
+  - PIAPI_RETRY_MAX_MS=8000
+  - PIAPI_REQUEST_TIMEOUT_MS=300000
+
+Notes:
+- Circuit state is stored in Redis (uses REDIS_URL). When the circuit is open, calls fail fast and let the queue reschedule with exponential backoff.
+- You can tune the above values via .env without code changes.
 
 4.  **Install Dependencies**:
     ```bash

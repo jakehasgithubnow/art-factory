@@ -4,13 +4,14 @@ import fetch from 'node-fetch';
 
 /**
  * Search Google Images (Custom Search API) for a query and return results.
- * Expects GOOGLE_API_KEY and GOOGLE_CX in environment variables.
+ * Expects GOOGLE_API_KEY and either GOOGLE_CSE_ID or GOOGLE_CX in environment variables.
  */
 export async function imageSearch(query, num = 10) {
   const apiKey = process.env.GOOGLE_API_KEY;
-  const cx = process.env.GOOGLE_CX;
+  const cx = process.env.GOOGLE_CSE_ID || process.env.GOOGLE_CX;
   if (!apiKey || !cx) {
-    throw new Error('Google API key (GOOGLE_API_KEY) or CX (GOOGLE_CX) not set');
+    console.warn('[Google imageSearch] Missing GOOGLE_API_KEY or GOOGLE_CSE_ID/GOOGLE_CX; returning no results');
+    return [];
   }
   const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
     query
