@@ -168,6 +168,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
+    let deletedDueToUploadFailure = 0;
 
     // Rejects: mark kept=false, processed=true
     if (rejectIds.length > 0) {
@@ -176,28 +177,41 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Approvals: kept=true, ensure Cloudinary upload present; then processed=true and enqueue artwork
     if (approveIds.length > 0) {
-      // Set kept=true upfront
+      // Set kept=true upfront for all approvals
       await db('photos').whereIn('id', approveIds).update({ kept: true });
 
-      // Upload missing Cloudinary assets
-      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
-      for (const p of needUpload) {
-        const { public_id, secure_url } = await uploadImage(p.src_url, {
-          folder: 'art-factory/source',
-          publicId: `source_${p.id}`,
-          overwrite: false
-        });
-        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
-        uploadedToCloudinary++;
+      // Separate those that already have assets vs need upload
+      const approveRows = rows.filter(r => approveIds.includes(r.id));
+      const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
+      const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // For those with existing assets: mark processed and enqueue
+      if (haveAssets.length > 0) {
+        await db('photos').whereIn('id', haveAssets).update({ processed: true });
+        await Promise.all(
+          haveAssets.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+        );
+        enqueuedArtwork += haveAssets.length;
       }
 
-      // Mark processed and enqueue artwork jobs
-      await db('photos').whereIn('id', approveIds).update({ processed: true });
-
-      await Promise.all(
-        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
-      );
-      enqueuedArtwork = approveIds.length;
+      // For those needing upload: try per-item; on failure delete and continue
+      for (const p of needUpload) {
+        try {
+          const { public_id, secure_url } = await uploadImage(p.src_url, {
+            folder: 'art-factory/source',
+            publicId: `source_${p.id}`,
+            overwrite: false
+          });
+          await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url, processed: true });
+          uploadedToCloudinary++;
+          await qArtwork.add('artwork', { photoId: p.id }, { jobId: `artwork:${p.id}` });
+          enqueuedArtwork++;
+        } catch (e) {
+          // Upload failed: delete the photo and move on
+          await db('photos').where({ id: p.id }).del();
+          deletedDueToUploadFailure++;
+        }
+      }
     }
 
     if (typeof req.log === 'function') {
@@ -209,6 +223,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
         rejected: rejectIds.length,
         uploadedToCloudinary,
         enqueuedArtwork,
+        deletedDueToUploadFailure,
         duration_ms: Date.now() - t0
       });
     }
@@ -218,7 +233,8 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
       approved: approveIds.length,
       rejected: rejectIds.length,
       uploadedToCloudinary,
-      enqueuedArtwork
+      enqueuedArtwork,
+      deletedDueToUploadFailure
     });
   } catch (err) {
     next(err);
@@ -246,17 +262,28 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
 
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
-    // Approve: mark kept, ensure upload, then enqueue artwork
+    // Approve: mark kept; if Cloudinary upload fails, delete and move on
     await db('photos').where({ id }).update({ kept: true });
 
-    if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
+    let hasAssets = Boolean(photo.cloudinary_id && photo.secure_url);
+    if (!hasAssets) {
+      try {
+        const { public_id, secure_url } = await uploadImage(photo.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${photo.id}`,
+          overwrite: false
+        });
+        await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary = true;
+        hasAssets = true;
+      } catch (e) {
+        // Upload failed: delete the photo and return ok
+        await db('photos').where({ id }).del();
+        if (typeof req.log === 'function') {
+          req.log({ event: 'moderate_photo', photoId: id, action: 'approve', deletedDueToUploadFailure: true });
+        }
+        return res.json({ ok: true, status: 'deleted' });
+      }
     }
 
     await db('photos').where({ id }).update({ processed: true });
