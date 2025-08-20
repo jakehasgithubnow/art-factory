@@ -184,7 +184,7 @@ async function loadNext() {
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
-  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId) + '&t=' + Date.now());
   if (data.done) {
     current = { location: null, photos: [] };
     remainingWrap.style.display = 'none';

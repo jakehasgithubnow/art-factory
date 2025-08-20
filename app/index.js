@@ -24,6 +24,15 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 
+// Disable ETag and force no-store to avoid 304 caching on dynamic endpoints
+app.set('etag', false);
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // ---------- Basic structured request logging ----------
 app.use((req, res, next) => {
   const start = Date.now();
@@ -206,7 +215,7 @@ nextBtn.addEventListener('click', async () => {
       const kept = el ? !el.classList.contains('fail') : true;
       return { id: p.id, kept };
     });
-    await fetch('/moderate/location/' + current.location.id, {
+    await j('/moderate/location/' + current.location.id, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -228,7 +237,7 @@ async function loadNext() {
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
-  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId) + '&t=' + Date.now());
   if (data.done) {
     current = { location: null, photos: [] };
     remainingWrap.style.display = 'none';
@@ -360,6 +369,9 @@ app.get('/admin/photos/next', async (req, res, next) => {
       });
     }
 
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
   } catch (err) {
     next(err);
@@ -390,13 +402,22 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     await db('photos').where({ id }).update({ kept: true });
 
     if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false,
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
+      try {
+        const { public_id, secure_url } = await uploadImage(photo.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${photo.id}`,
+          overwrite: false,
+        });
+        await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary = true;
+      } catch (e) {
+        // Upload failed: delete the photo and return ok
+        await db('photos').where({ id }).del();
+        if (typeof req.log === 'function') {
+          req.log({ event: 'moderate_photo', photoId: id, action: 'approve', deletedDueToUploadFailure: true });
+        }
+        return res.json({ ok: true, status: 'deleted' });
+      }
     }
 
     await db('photos').where({ id }).update({ processed: true });
@@ -443,31 +464,47 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
+    let deletedDueToUploadFailure = 0;
 
     if (rejectIds.length > 0) {
       await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
     }
 
     if (approveIds.length > 0) {
+      // Mark approvals as kept
       await db('photos').whereIn('id', approveIds).update({ kept: true });
 
-      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
-      for (const p of needUpload) {
-        const { public_id, secure_url } = await uploadImage(p.src_url, {
-          folder: 'art-factory/source',
-          publicId: `source_${p.id}`,
-          overwrite: false
-        });
-        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
-        uploadedToCloudinary++;
+      const approveRows = rows.filter(r => approveIds.includes(r.id));
+      const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
+      const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Already have assets: mark processed + enqueue
+      if (haveAssets.length > 0) {
+        await db('photos').whereIn('id', haveAssets).update({ processed: true });
+        await Promise.all(
+          haveAssets.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+        );
+        enqueuedArtwork += haveAssets.length;
       }
 
-      await db('photos').whereIn('id', approveIds).update({ processed: true });
-
-      await Promise.all(
-        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
-      );
-      enqueuedArtwork = approveIds.length;
+      // Missing assets: try upload; on failure delete and continue
+      for (const p of needUpload) {
+        try {
+          const { public_id, secure_url } = await uploadImage(p.src_url, {
+            folder: 'art-factory/source',
+            publicId: `source_${p.id}`,
+            overwrite: false
+          });
+          await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url, processed: true });
+          uploadedToCloudinary++;
+          await qArtwork.add('artwork', { photoId: p.id }, { jobId: `artwork:${p.id}` });
+          enqueuedArtwork++;
+        } catch (e) {
+          // Upload failed (e.g., >10MB): delete the photo and move on
+          await db('photos').where({ id: p.id }).del();
+          deletedDueToUploadFailure++;
+        }
+      }
     }
 
     if (typeof req.log === 'function') {
@@ -479,6 +516,7 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
         rejected: rejectIds.length,
         uploadedToCloudinary,
         enqueuedArtwork,
+        deletedDueToUploadFailure,
         duration_ms: Date.now() - t0
       });
     }
@@ -488,7 +526,8 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
       approved: approveIds.length,
       rejected: rejectIds.length,
       uploadedToCloudinary,
-      enqueuedArtwork
+      enqueuedArtwork,
+      deletedDueToUploadFailure
     });
   } catch (err) {
     next(err);
