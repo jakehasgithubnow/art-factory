@@ -162,7 +162,7 @@ nextBtn.addEventListener('click', async () => {
       const kept = el ? !el.classList.contains('fail') : true;
       return { id: p.id, kept };
     });
-    await fetch('/moderate/location/' + current.location.id, {
+    await j('/moderate/location/' + current.location.id, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
