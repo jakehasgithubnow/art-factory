@@ -99,6 +99,17 @@ export default async function locations(job) {
         console.warn('locations workflow: Google Places enrichment failed', { catchmentId, place: p?.name, err: e });
       }
 
+      // Normalize fields for DB types
+      // g_photo_refs column is jsonb; ensure we send valid JSON text, not a PG array literal
+      if (Array.isArray(enrichment.g_photo_refs)) {
+        try {
+          enrichment.g_photo_refs = JSON.stringify(enrichment.g_photo_refs);
+        } catch (_e) {
+          // On serialization failure, drop the field so DB default ('[]') applies
+          delete enrichment.g_photo_refs;
+        }
+      }
+
       const [loc] = await db('locations')
         .insert({ 
           ...p, 
