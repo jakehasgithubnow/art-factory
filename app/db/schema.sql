@@ -144,18 +144,22 @@ create index if not exists idx_photos_created_at on photos(created_at);
 create table if not exists artwork (
   id          uuid primary key default gen_random_uuid(),
   photo_id    uuid not null references photos(id) on delete cascade,
+  style_prompt_id integer references style_prompts(id),
+  style_name  text,
   image_url   text not null,
   description text,
   mockup_urls jsonb default '[]'::jsonb,
   shopify_id  text,
+  approved_for_publish boolean default false,
+  moderated_at timestamptz,
   published   boolean not null default false,
   created_at  timestamptz default now()
 );
 
 create index if not exists idx_artwork_photo on artwork(photo_id);
 
--- One artwork per source photo
-create unique index if not exists artwork_unique_per_photo on artwork(photo_id);
+-- One artwork per source photo per style
+create unique index if not exists artwork_unique_per_photo_style on artwork(photo_id, style_prompt_id);
 
 -- Avoid duplicate Shopify products when backfilling
 create unique index if not exists artwork_shopify_unique

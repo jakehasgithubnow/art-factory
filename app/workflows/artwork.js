@@ -195,28 +195,31 @@ export default async function artwork(job) {
         console.warn('[artwork] Could not mark artwork complete in tracker', e);
       }
 
-      // Save to DB
-      for (let i = 0; i < promptFinalUrls.length; i++) {
-        const url = promptFinalUrls[i];
-        const desc = (i === 0) ? description : '';
+      // Save to DB — one artwork row per photo per style (first image only)
+      if (mainPaintingUrl) {
         const inserted = await db('artwork')
-          .insert({ photo_id: photoId, image_url: url, description: desc })
-          .onConflict('photo_id').ignore() // prevent duplicate key crash
+          .insert({
+            photo_id: photoId,
+            style_prompt_id: stylePrompt.id,
+            style_name: stylePrompt.text,
+            image_url: mainPaintingUrl,
+            description: description
+          })
+          .onConflict(['photo_id', 'style_prompt_id']).ignore()
           .returning(['id']);
         const artId = inserted?.[0]?.id;
         if (!artId) {
-          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this style.`);
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} and style ${stylePrompt.id} (possibly duplicate). Skipping mockup/publish steps for this style.`);
           // Avoid any undefined variables from lingering from earlier steps
           res = null;
-          continue;
-        }
-
-        if (i === 0) {
+        } else {
           // Always require moderation approval before mockup/publish
           try {
             await db('artwork').where({ id: artId }).update({ approved_for_publish: false });
           } catch {}
         }
+      } else {
+        console.warn('[artwork] No mainPaintingUrl to save for this style; skipping DB insert.');
       }
     }
 
