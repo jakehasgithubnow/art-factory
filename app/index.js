@@ -49,7 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- Moderation UI ----------
+// ---------- Moderation UI (Photos by Location: up to 20 images, default PASS, toggle FAIL, Next) ----------
 app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
   try {
@@ -60,69 +60,436 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Moderate Photos</title>
 <style>
-  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
+  :root{
+    --bg:#0b0d11;--panel:#151922;--border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;
+    --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1200px;margin:20px auto;padding:0 16px 88px}
   h1{font-size:18px;margin:12px 0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
-  .img{width:100%;height:160px;object-fit:cover;display:block;background:#0f1320}
-  .meta{padding:10px}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
-  .reject{background:#ef4444}
-  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
-  .muted{color:#9aa4b2}
+  .muted{color:var(--muted)}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  input{width:100%;max-width:420px;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
+  .card:hover{transform:translateY(-1px)}
+  .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
+  .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
+  .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
+  .badge.fail{background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.35)}
+  .card.fail .img{filter:grayscale(.6) contrast(.8) brightness(.9)}
+  .card.fail{outline-color:rgba(239,68,68,.5)}
+  .strike{position:absolute;inset:0;display:none;pointer-events:none}
+  .card.fail .strike{display:block}
+  .strike:before,.strike:after{content:"";position:absolute;left:10%;right:10%;top:50%;height:2px;background:rgba(239,68,68,.8)}
+  .strike:after{transform:rotate(90deg)}
+  .small{font-size:12px}
+  .cta{position:fixed;left:0;right:0;bottom:0;background:rgba(11,13,17,.9);backdrop-filter:saturate(120%) blur(10px);border-top:1px solid var(--border)}
+  .cta-inner{max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .btn{background:var(--btn);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}
+  .btn[disabled]{opacity:.6;cursor:not-allowed}
+  .counts{display:flex;gap:10px;align-items:center}
+  .pill{border:1px solid var(--border);border-radius:999px;padding:6px 10px}
+  .kpis{display:flex;gap:16px;align-items:center}
+  a.link{color:#8ab4ff;text-decoration:none}
+  .empty{padding:48px 16px;background:var(--panel);border:1px dashed var(--border);border-radius:12px;text-align:center}
 </style>
 <div class="wrap">
   <h1>Moderate Photos</h1>
-  <div class="muted">Catchment: ${catchmentId}</div>
-  <div style="max-width:420px;margin:10px 0">
+  <div class="row">
+    <div class="muted small">Catchment: ${catchmentId}</div>
+    <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
+  </div>
+  <div style="margin:10px 0">
     <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
   </div>
   <div id="grid" class="grid"></div>
+  <div id="done" class="empty" style="display:none">
+    <div style="font-weight:700;margin-bottom:6px">All locations reviewed</div>
+    <div class="muted">No more photos need moderation in this catchment.</div>
+  </div>
 </div>
+
+<div class="cta">
+  <div class="cta-inner">
+    <div class="kpis">
+      <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
+      <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+    </div>
+    <button id="nextBtn" class="btn">Next</button>
+  </div>
+</div>
+
 <script>
+const catchmentId = ${JSON.stringify(catchmentId)};
 const apiKeyInput = document.getElementById('apiKey');
 const grid = document.getElementById('grid');
-async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function load(){
-  const data = await json('/admin/photos?catchmentId=${catchmentId}');
-  grid.innerHTML = '';
-  for(const p of data.photos){
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = \`
-      <img class="img" src="\${p.src_url}" alt=""/>
-      <div class="meta">
-        <div class="small muted"><b>\${p.title || ''}</b> \${p.creator ? '— ' + p.creator : ''}</div>
-        <div class="small muted">License: \${p.license || ''} \${p.license_version || ''}</div>
-        <div class="small muted">Source: \${p.source || ''} \${p.provider ? '('+p.provider+')' : ''}</div>
-        <div class="small muted">Dims: \${p.width||''}×\${p.height||''}</div>
-        <div class="small muted"><a href="\${p.detail_url||'#'}" target="_blank">Details</a> · <a href="\${p.creator_url||'#'}" target="_blank">Creator</a></div>
-        <div class="row"><div>Score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)} · Kept: \${p.kept ? true : false}</div></div>
-        <div class="row">
-          <button data-act="approve" data-id="\${p.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="\${p.id}">Reject</button>
-        </div>
-      </div>\`;
-    grid.appendChild(card);
+const locNameEl = document.getElementById('locName');
+const remainingWrap = document.getElementById('remainingWrap');
+const remainingEl = document.getElementById('remaining');
+const passCountEl = document.getElementById('passCount');
+const failCountEl = document.getElementById('failCount');
+const nextBtn = document.getElementById('nextBtn');
+const doneEl = document.getElementById('done');
+
+let current = { location: null, photos: [] };
+
+async function j(url, opts={}) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function cardHTML(p) {
+  // default to PASS regardless of previous kept value
+  return \`
+  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="strike"></div>
+    <img class="img" src="\${p.src_url}" alt=""/>
+    <div class="meta">
+      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="badge pass">PASS</div>
+    </div>
+  </div>\`;
+}
+
+function render() {
+  if (!current.location) return;
+  locNameEl.textContent = current.location.name || '—';
+  grid.innerHTML = current.photos.map(cardHTML).join('');
+  doneEl.style.display = 'none';
+  updateCounts();
+}
+
+function updateCounts() {
+  const cards = Array.from(grid.querySelectorAll('.card'));
+  const fail = cards.filter(c => c.classList.contains('fail')).length;
+  const pass = cards.length - fail;
+  passCountEl.textContent = pass;
+  failCountEl.textContent = fail;
+}
+
+function setBadge(card) {
+  const badge = card.querySelector('.badge');
+  if (!badge) return;
+  if (card.classList.contains('fail')) {
+    badge.textContent = 'FAIL';
+    badge.classList.remove('pass');
+    badge.classList.add('fail');
+  } else {
+    badge.textContent = 'PASS';
+    badge.classList.remove('fail');
+    badge.classList.add('pass');
   }
 }
 
-grid.addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button');
-  if(!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  try{
-    await fetch('/moderate/photo/' + id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
-    await load();
-  }catch(e){ alert(e.message); }
+grid.addEventListener('click', (ev) => {
+  const card = ev.target.closest('.card');
+  if (!card) return;
+  const willFail = !card.classList.contains('fail');
+  card.classList.toggle('fail', willFail);
+  setBadge(card);
+  updateCounts();
 });
 
-load();
+nextBtn.addEventListener('click', async () => {
+  if (!current.location) return;
+  try {
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Saving…';
+    const decisions = current.photos.map(p => {
+      const el = document.getElementById('card-' + p.id);
+      const kept = el ? !el.classList.contains('fail') : true;
+      return { id: p.id, kept };
+    });
+    await fetch('/moderate/location/' + current.location.id, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKeyInput.value || ''
+      },
+      body: JSON.stringify({ decisions, catchmentId })
+    });
+    await loadNext();
+  } catch (e) {
+    alert(e.message || 'Save failed');
+  } finally {
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Next';
+  }
+});
+
+async function loadNext() {
+  locNameEl.textContent = '…';
+  passCountEl.textContent = '0';
+  failCountEl.textContent = '0';
+  grid.innerHTML = '';
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  if (data.done) {
+    current = { location: null, photos: [] };
+    remainingWrap.style.display = 'none';
+    doneEl.style.display = 'block';
+    return;
+  }
+  current = { location: data.location, photos: data.photos || [] };
+  remainingWrap.style.display = (typeof data.remaining === 'number') ? 'inline-flex' : 'none';
+  if (typeof data.remaining === 'number') remainingEl.textContent = data.remaining;
+  render();
+}
+
+loadNext();
 </script>
 </html>`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Photos API for moderation (legacy: full list) ----------
+app.get('/admin/photos', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+    const rows = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      )
+      .where('l.catchment_id', catchmentId)
+      .orderBy('p.created_at', 'desc');
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({ photos: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- New: Fetch next location with up to 20 unprocessed photos ----------
+app.get('/admin/photos/next', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+
+    const loc = await db('locations as l')
+      .where('l.catchment_id', catchmentId)
+      .whereExists(function () {
+        this.select(1)
+          .from('photos as p')
+          .whereRaw('p.location_id = l.id')
+          .andWhere('p.processed', false);
+      })
+      .orderBy('l.created_at', 'asc')
+      .select('l.id', 'l.name')
+      .first();
+
+    if (!loc) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'admin_photos_next', catchmentId, done: true, duration_ms: Date.now() - t0 });
+      }
+      return res.json({ done: true });
+    }
+
+    const photos = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .orderBy('p.created_at', 'desc')
+      .limit(20)
+      .select(
+        'p.id',
+        'p.src_url',
+        'p.kept',
+        'p.score',
+        'p.processed',
+        'p.ov_id',
+        'p.ov_title',
+        'p.ov_creator',
+        'p.ov_creator_url',
+        'p.ov_license',
+        'p.ov_license_version',
+        'p.ov_license_url',
+        'p.ov_source',
+        'p.ov_category',
+        'p.ov_provider',
+        'p.ov_thumbnail',
+        'p.ov_detail_url',
+        'p.ov_width',
+        'p.ov_height'
+      );
+
+    const remainingRow = await db('photos as p')
+      .where('p.location_id', loc.id)
+      .andWhere('p.processed', false)
+      .count({ c: '*' })
+      .first();
+    const remaining = Number(remainingRow?.c ?? 0);
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'admin_photos_next',
+        catchmentId,
+        locationId: loc.id,
+        photos: photos.length,
+        remaining,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Legacy single-photo moderation ----------
+app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const action = (req.body?.action || '').toString();
+  const t0 = Date.now();
+  let uploadedToCloudinary = false;
+  let enqueuedArtwork = false;
+  try {
+    const photo = await db('photos').where({ id }).first();
+    if (!photo) return res.status(404).json({ error: 'not_found' });
+
+    if (action === 'reject') {
+      await db('photos').where({ id }).update({ kept: false, processed: true });
+      if (typeof req.log === 'function') {
+        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
+      }
+      return res.json({ ok: true, status: 'rejected' });
+    }
+
+    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
+
+    await db('photos').where({ id }).update({ kept: true });
+
+    if (!photo.cloudinary_id || !photo.secure_url) {
+      const { public_id, secure_url } = await uploadImage(photo.src_url, {
+        folder: 'art-factory/source',
+        publicId: `source_${photo.id}`,
+        overwrite: false,
+      });
+      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+      uploadedToCloudinary = true;
+    }
+
+    await db('photos').where({ id }).update({ processed: true });
+    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
+    enqueuedArtwork = true;
+    if (typeof req.log === 'function') {
+      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
+    }
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- New: Bulk moderation for a location (pass/fail) ----------
+app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next) => {
+  const t0 = Date.now();
+  const { locationId } = req.params;
+  const { decisions, catchmentId } = req.body || {};
+  try {
+    if (!Array.isArray(decisions) || decisions.length === 0) {
+      return res.status(400).json({ error: 'missing_decisions' });
+    }
+
+    const keepMap = new Map();
+    const ids = [];
+    for (const d of decisions) {
+      if (!d || !d.id) continue;
+      ids.push(d.id);
+      keepMap.set(d.id, Boolean(d.kept));
+    }
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'no_ids' });
+    }
+
+    const rows = await db('photos')
+      .whereIn('id', ids)
+      .andWhere({ location_id: locationId })
+      .select('id', 'src_url', 'cloudinary_id', 'secure_url');
+
+    const validIds = rows.map(r => r.id);
+    const approveIds = validIds.filter(id => keepMap.get(id) === true);
+    const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+
+    let uploadedToCloudinary = 0;
+    let enqueuedArtwork = 0;
+
+    if (rejectIds.length > 0) {
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+    }
+
+    if (approveIds.length > 0) {
+      await db('photos').whereIn('id', approveIds).update({ kept: true });
+
+      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
+      for (const p of needUpload) {
+        const { public_id, secure_url } = await uploadImage(p.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${p.id}`,
+          overwrite: false
+        });
+        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary++;
+      }
+
+      await db('photos').whereIn('id', approveIds).update({ processed: true });
+
+      await Promise.all(
+        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+      );
+      enqueuedArtwork = approveIds.length;
+    }
+
+    if (typeof req.log === 'function') {
+      req.log({
+        event: 'moderate_location',
+        locationId,
+        catchmentId: catchmentId || null,
+        approved: approveIds.length,
+        rejected: rejectIds.length,
+        uploadedToCloudinary,
+        enqueuedArtwork,
+        duration_ms: Date.now() - t0
+      });
+    }
+
+    res.json({
+      ok: true,
+      approved: approveIds.length,
+      rejected: rejectIds.length,
+      uploadedToCloudinary,
+      enqueuedArtwork
+    });
   } catch (err) {
     next(err);
   }
@@ -199,48 +566,7 @@ load();
   } catch (err) { next(err); }
 });
 
-// JSON for moderation grid
-app.get('/admin/photos', async (req, res, next) => {
-  const t0 = Date.now();
-  try {
-    const { catchmentId } = req.query;
-    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
-    const rows = await db('photos as p')
-      .join('locations as l', 'l.id', 'p.location_id')
-      .select(
-        'p.id',
-        'p.src_url',
-        'p.kept',
-        'p.score',
-        'p.processed',
-        'p.openverse_id',
-        'p.title',
-        'p.creator',
-        'p.creator_url',
-        'p.license',
-        'p.license_version',
-        'p.license_url',
-        'p.source',
-        'p.category',
-        'p.provider',
-        'p.thumbnail_url',
-        'p.detail_url',
-        'p.width',
-        'p.height',
-        'p.openverse_metadata'
-      )
-      .where('l.catchment_id', catchmentId)
-      .orderBy('p.created_at','desc');
-    if (typeof req.log === 'function') {
-      req.log({ event: 'admin_photos', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
-    }
-    res.json({ photos: rows });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// List artworks for moderation (pending by default)
+// ---------- List artworks for moderation ----------
 app.get('/admin/artworks', async (req, res, next) => {
   const t0 = Date.now();
   try {
@@ -271,53 +597,7 @@ app.get('/admin/artworks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Approve/Reject photo
-app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
-  const { id } = req.params;
-  const action = (req.body?.action || '').toString();
-  const t0 = Date.now();
-  let uploadedToCloudinary = false;
-  let enqueuedArtwork = false;
-  try {
-    const photo = await db('photos').where({ id }).first();
-    if (!photo) return res.status(404).json({ error: 'not_found' });
-
-    if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
-      if (typeof req.log === 'function') {
-        req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
-      }
-      return res.json({ ok: true, status: 'rejected' });
-    }
-
-    if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
-
-    // Approve: mark kept, ensure upload, then enqueue artwork
-    await db('photos').where({ id }).update({ kept: true });
-
-    if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false,
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
-    }
-
-    await db('photos').where({ id }).update({ processed: true });
-    await qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` });
-    enqueuedArtwork = true;
-    if (typeof req.log === 'function') {
-      req.log({ event: 'moderate_photo', photoId: id, action: 'approve', uploadedToCloudinary, enqueuedArtwork, duration_ms: Date.now() - t0 });
-    }
-    res.json({ ok: true, status: 'approved' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Moderate generated artwork (approve => enqueue publish, reject => mark only)
+// ---------- Moderate generated artwork ----------
 app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const { action } = req.body || {};
@@ -337,7 +617,6 @@ app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
     res.json({ ok: true, status: 'approved' });
   } catch (err) { next(err); }
 });
-
 
 // ---------- Operator UI (no build step) ----------
 app.get('/', (_req, res) => {
@@ -770,6 +1049,7 @@ app.get('/admin/recent', async (_req, res, next) => {
   }
 });
 
+// Mount admin style prompts UIs
 app.use('/admin/style-prompts', (await import('./server/routes/admin/stylePrompts.js')).default);
 app.use('/', (await import('./server/routes/admin/stylePromptsUI.js')).default);
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { log } from '../server/utils/logger.js';
 import { env } from '../config/env.js';
 import { enhanceError } from '../server/utils/error.js';
+import { withCircuitBreaker, retryWithBackoff, classifyPiapiError, RetryableError } from '../lib/resilience.js';
 
 export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini') {
   const traceId = randomUUID();
@@ -192,122 +193,158 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
     env.paintEndpoint ||
     "https://api-direct.piapi.ai/v1/chat/completions";
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-      Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
-            { type: "text", text: prompt }
-          ]
+  // Retry/circuit config (override via env)
+  const retries = Number(process.env.PIAPI_RETRIES ?? 2);
+  const timeoutMs = Number(process.env.PIAPI_REQUEST_TIMEOUT_MS ?? 300000);
+  const base = Number(process.env.PIAPI_RETRY_BASE_MS ?? 1000);
+  const maxBackoff = Number(process.env.PIAPI_RETRY_MAX_MS ?? 8000);
+
+  const requestOnce = async ({ attempt, signal }) => {
+    log({ event: "generateImage_attempt", traceId, attempt });
+
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+              { type: "text", text: prompt }
+            ]
+          }
+        ],
+        stream: true,
+      }),
+      signal,
+    });
+
+    if (!resp.ok || !resp.body) {
+      const preview = await (async () => {
+        try { return await resp.text(); } catch { return ""; }
+      })();
+      log({ event: "generateImage_http_error", traceId, status: resp.status, preview: preview?.slice(0, 400) });
+      const e = new Error(`PiAPI request failed with status ${resp.status}`);
+      e.status = resp.status;
+      throw e;
+    }
+
+    let imageUrls = [];
+    const decoder = new TextDecoder();
+
+    function collectFromContentParts(parts, source) {
+      if (!Array.isArray(parts)) return;
+      for (const part of parts) {
+        // Standard image_url part
+        if (part?.type === "image_url" && part.image_url?.url) {
+          imageUrls.push(String(part.image_url.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
         }
-      ],
-      stream: true,
-    }),
-  });
-
-  if (!resp.ok || !resp.body) {
-    const preview = await (async () => {
-      try { return await resp.text(); } catch { return ""; }
-    })();
-    log({ event: "generateImage_http_error", traceId, status: resp.status, preview: preview?.slice(0, 400) });
-    throw new Error(`PiAPI request failed with status ${resp.status}`);
-  }
-
-  let imageUrls = [];
-  const decoder = new TextDecoder();
-
-  function collectFromContentParts(parts, source) {
-    if (!Array.isArray(parts)) return;
-    for (const part of parts) {
-      // Standard image_url part
-      if (part?.type === "image_url" && part.image_url?.url) {
-        imageUrls.push(String(part.image_url.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
-      }
-      // PiAPI/OpenAI output_image (URL-backed)
-      if (part?.type === "output_image" && part.source?.type === "url" && part.source?.url) {
-        imageUrls.push(String(part.source.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.source.url });
-      }
-      // Generic image part with url
-      if (part?.type === "image" && part.image_url?.url) {
-        imageUrls.push(String(part.image_url.url));
-        log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
-      }
-      // Base64 fallback (convert to data URL)
-      if (part?.type === "output_image" && part.b64_json) {
-        const dataUrl = `data:image/png;base64,${part.b64_json}`;
-        imageUrls.push(dataUrl);
-        log({ event: "generateImage_found_b64", traceId, source, length: part.b64_json.length });
+        // PiAPI/OpenAI output_image (URL-backed)
+        if (part?.type === "output_image" && part.source?.type === "url" && part.source?.url) {
+          imageUrls.push(String(part.source.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.source.url });
+        }
+        // Generic image part with url
+        if (part?.type === "image" && part.image_url?.url) {
+          imageUrls.push(String(part.image_url.url));
+          log({ event: "generateImage_found_url", traceId, source, imageUrl: part.image_url.url });
+        }
+        // Base64 fallback (convert to data URL)
+        if (part?.type === "output_image" && part.b64_json) {
+          const dataUrl = `data:image/png;base64,${part.b64_json}`;
+          imageUrls.push(dataUrl);
+          log({ event: "generateImage_found_b64", traceId, source, length: part.b64_json.length });
+        }
       }
     }
-  }
 
-  // Robust SSE parsing: buffer until full events separated by \n\n
-  let buffer = "";
-  try {
-    for await (const chunk of resp.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let sepIndex;
-      while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-        const eventBlock = buffer.slice(0, sepIndex);
-        buffer = buffer.slice(sepIndex + 2);
+    // Robust SSE parsing: buffer until full events separated by \n\n
+    let buffer = "";
+    try {
+      for await (const chunk of resp.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let sepIndex;
+        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+          const eventBlock = buffer.slice(0, sepIndex);
+          buffer = buffer.slice(sepIndex + 2);
 
-        // Concatenate multi-line "data:" payloads
-        const dataLines = eventBlock
-          .split("\n")
-          .filter(l => l.startsWith("data:"))
-          .map(l => l.slice(5).trim());
+          // Concatenate multi-line "data:" payloads
+          const dataLines = eventBlock
+            .split("\n")
+            .filter(l => l.startsWith("data:"))
+            .map(l => l.slice(5).trim());
 
-        if (dataLines.length === 0) continue;
-        const dataStr = dataLines.join("\n");
-        if (dataStr === "[DONE]") continue;
+          if (dataLines.length === 0) continue;
+          const dataStr = dataLines.join("\n");
+          if (dataStr === "[DONE]") continue;
 
-        try {
-          log({ event: "generateImage_raw_chunk", traceId, preview: dataStr.slice(0, 300) });
-          const data = JSON.parse(dataStr);
+          try {
+            log({ event: "generateImage_raw_chunk", traceId, preview: dataStr.slice(0, 300) });
+            const data = JSON.parse(dataStr);
 
-          // Streaming deltas
-          collectFromContentParts(data?.choices?.[0]?.delta?.content, "delta");
-          // Final message (non-streaming end frame)
-          collectFromContentParts(data?.choices?.[0]?.message?.content, "message");
+            // Streaming deltas
+            collectFromContentParts(data?.choices?.[0]?.delta?.content, "delta");
+            // Final message (non-streaming end frame)
+            collectFromContentParts(data?.choices?.[0]?.message?.content, "message");
 
-          // Regex fallback
-          const str = JSON.stringify(data);
-          const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
-          if (urlMatches) {
-            for (const u of urlMatches) {
-              if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
-                imageUrls.push(u);
-                log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
+            // Regex fallback
+            const str = JSON.stringify(data);
+            const urlMatches = str.match(/https?:\/\/[^\s"'()\\]+/g);
+            if (urlMatches) {
+              for (const u of urlMatches) {
+                if (/(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u)) {
+                  imageUrls.push(u);
+                  log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
+                }
               }
             }
+          } catch (e) {
+            log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
           }
-        } catch (e) {
-          log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
         }
       }
+    } catch (err) {
+      log({ event: "generateImage_error", traceId, message: err?.message });
+      throw err;
     }
+
+    // Deduplicate & normalize
+    imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
+
+    log({ event: "generateImage_complete_attempt", traceId, attempt, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+    if (imageUrls.length === 0) {
+      throw new RetryableError("PiAPI stream did not include any image URLs", { attempt });
+    }
+    return imageUrls;
+  };
+
+  try {
+    const imageUrls = await withCircuitBreaker(
+      "piapi",
+      () =>
+        retryWithBackoff(requestOnce, {
+          retries,
+          base,
+          max: maxBackoff,
+          jitter: true,
+          timeoutMs,
+          classify: classifyPiapiError,
+          onAttempt: ({ attempt }) => log({ event: "piapi_retry_attempt", traceId, attempt }),
+          onFail: ({ attempt, err }) => log({ event: "piapi_retry_fail", traceId, attempt, message: err?.message }),
+        }),
+      { classify: classifyPiapiError }
+    );
+
+    log({ event: "generateImage_success", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
+    return imageUrls;
   } catch (err) {
-    log({ event: "generateImage_error", traceId, message: err?.message });
     throw enhanceError(err, { stage: "generateImage", model });
   }
-
-  // Deduplicate & normalize
-  imageUrls = [...new Set(imageUrls.map(u => String(u).trim()))];
-
-  log({ event: "generateImage_complete", traceId, duration_ms: Date.now() - start, foundCount: imageUrls.length });
-  if (imageUrls.length === 0) {
-    throw new Error("PiAPI stream did not include any image URLs");
-  }
-  return imageUrls;
 }

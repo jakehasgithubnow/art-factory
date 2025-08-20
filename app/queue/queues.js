@@ -6,8 +6,8 @@ import { env } from '../config/env.js';
 const connection = new IORedis(env.redisUrl);
 
 // Sensible defaults with env overrides
-const ATTEMPTS = Number.parseInt(process.env.QUEUE_ATTEMPTS || '5', 10);
-const BACKOFF_MS = Number.parseInt(process.env.QUEUE_BACKOFF_MS || '1000', 10);
+const ATTEMPTS = Number.parseInt(process.env.QUEUE_ATTEMPTS ?? String(env.queue?.attempts ?? 8), 10);
+const BACKOFF_MS = Number.parseInt(process.env.QUEUE_BACKOFF_MS ?? String(env.queue?.backoffMs ?? 30000), 10);
 const REMOVE_ON_COMPLETE = process.env.QUEUE_REMOVE_ON_COMPLETE
   ? process.env.QUEUE_REMOVE_ON_COMPLETE === 'true'
   : true;

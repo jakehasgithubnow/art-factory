@@ -67,7 +67,7 @@ In essence, the application automates the entire process from defining a geograp
     FRAME_MOCK_URL=...
 
     # Paint-API (PiAPI) — for generating the AI paintings
-    PAINT_API_URL=...
+    PAINT_ENDPOINT=...
     PAINT_API_KEY=...
 
     # Shopify
@@ -80,6 +80,34 @@ In essence, the application automates the entire process from defining a geograp
     # Optional: custom port (defaults to 3000)
     PORT=3003
     ```
+
+### Resilience and Queue Backoff
+
+The app now includes centralized resilience for PiAPI calls:
+- Circuit breaker (Redis-backed) to avoid hammering a down service
+- Exponential backoff with jitter and per-attempt timeouts
+- Queue-level exponential backoff for long outages
+
+Optional environment variables (with defaults):
+
+- Queue (BullMQ):
+  - QUEUE_ATTEMPTS=8
+  - QUEUE_BACKOFF_MS=30000
+
+- Circuit breaker:
+  - PIAPI_CIRCUIT_MIN_FAILURES=5
+  - PIAPI_CIRCUIT_WINDOW_MS=60000
+  - PIAPI_CIRCUIT_COOLDOWN_MS=120000
+
+- Request retry:
+  - PIAPI_RETRIES=2
+  - PIAPI_RETRY_BASE_MS=1000
+  - PIAPI_RETRY_MAX_MS=8000
+  - PIAPI_REQUEST_TIMEOUT_MS=300000
+
+Notes:
+- Circuit state is stored in Redis (uses REDIS_URL). When the circuit is open, calls fail fast and let the queue reschedule with exponential backoff.
+- You can tune the above values via .env without code changes.
 
 4.  **Install Dependencies**:
     ```bash

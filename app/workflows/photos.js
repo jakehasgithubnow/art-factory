@@ -6,7 +6,7 @@ import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
 
 const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
-const OPENVERSE_TOP_N = 50;
+const OPENVERSE_TOP_N = 20;
 const GOOGLE_TOP_N = 10;
 
 function clamp01(n) {
@@ -74,7 +74,7 @@ export default async function photos(job) {
     }
 
     if (source === 'openverse') {
-      // OPENVERSE PATH: store top 50, then classify with GPT using thumbnail; delete if 0, keep if 1
+      // OPENVERSE PATH: store top 20, then classify with GPT using thumbnail; delete if 0, keep if 1
       let photoRow;
       try {
         const insertData = {
