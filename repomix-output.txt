@@ -1281,25 +1281,57 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
     const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
-    const insert = await db('catchments')
-      .insert({ name, lat, lon, intro })
-      .returning(['id']);
-    const id = insert?.[0]?.id;
-    if (!id) throw new Error('Failed to create catchment');
-    if (typeof req.log === 'function') {
-      req.log({ event: 'catchment_inserted', catchmentId: id });
+    // Find-or-create to avoid 23505 on unique (lower(name), lat, lon)
+    let id;
+    try {
+      const existing = await db('catchments')
+        .whereRaw('lower(name) = ? and lat = ? and lon = ?', [name.toLowerCase(), lat, lon])
+        .first('id');
+
+      if (existing?.id) {
+        id = existing.id;
+        if (typeof req.log === 'function') {
+          req.log({ event: 'catchment_found', catchmentId: id });
+        }
+      } else {
+        const insert = await db('catchments')
+          .insert({ name, lat, lon, intro })
+          .returning(['id']);
+        id = insert?.[0]?.id;
+        if (!id) throw new Error('Failed to create catchment');
+        if (typeof req.log === 'function') {
+          req.log({ event: 'catchment_inserted', catchmentId: id });
+        }
+      }
+    } catch (e) {
+      // Attach minimal context and bubble to error handler
+      e.context = { route: 'POST /catchments', phase: 'db_find_or_create', name, lat, lon };
+      throw e;
     }
+
     // Enqueue stage 1 explicitly (idempotent jobId)
-    await qCatchment.add(
-      'catchment',
-      { catchmentId: id, imageSource },
-      { jobId: `catchment:${id}` }
-    );
-    if (typeof req.log === 'function') {
-      req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+    try {
+      await qCatchment.add(
+        'catchment',
+        { catchmentId: id, imageSource },
+        { jobId: `catchment:${id}` }
+      );
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_enqueued', catchmentId: id, jobId: `catchment:${id}`, duration_ms: Date.now() - t0 });
+      }
+      return res.status(202).json({ id });
+    } catch (e) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_enqueue_failed', catchmentId: id, jobId: `catchment:${id}`, name: e?.name, message: e?.message });
+      }
+      // Service unavailable: record exists but pipeline not started; client can retry/requeue
+      return res.status(503).json({ id, error: 'enqueue_failed' });
     }
-    return res.status(202).json({ id });
   } catch (err) {
+    if (typeof req.log === 'function') {
+      req.log({ event: 'catchment_request_error', name: err?.name, message: err?.message });
+    }
+    err.context = { ...(err.context || {}), route: 'POST /catchments' };
     next(err);
   }
 });
@@ -1692,10 +1724,14 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.ov_source',
         'p.ov_category',
         'p.ov_provider',
-        'p.ov_thumbnail',
-        'p.ov_detail_url',
+        db.raw('coalesce(p.ov_thumbnail, p.thumbnail_url) as ov_thumbnail'),
+        db.raw('coalesce(p.ov_detail_url, p.detail_url) as ov_detail_url'),
         'p.ov_width',
-        'p.ov_height'
+        'p.ov_height',
+        // include legacy fields for diagnostics
+        'p.thumbnail_url',
+        'p.detail_url',
+        'p.provider'
       );
 
     const remainingRow = await db('photos as p')
@@ -1706,12 +1742,18 @@ router.get('/admin/photos/next', async (req, res, next) => {
     const remaining = Number(remainingRow?.c ?? 0);
 
     if (typeof req.log === 'function') {
+      const thumbSummary = {
+        ovThumb: photos.filter(p => p.ov_thumbnail).length,
+        legacyThumb: photos.filter(p => !p.ov_thumbnail && p.thumbnail_url).length,
+        noThumb: photos.filter(p => !p.ov_thumbnail && !p.thumbnail_url).length
+      };
       req.log({
         event: 'admin_photos_next',
         catchmentId,
         locationId: loc.id,
         photos: photos.length,
         remaining,
+        thumbSummary,
         duration_ms: Date.now() - t0
       });
     }
@@ -1760,6 +1802,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
+    let deletedDueToUploadFailure = 0;
 
     // Rejects: mark kept=false, processed=true
     if (rejectIds.length > 0) {
@@ -1768,28 +1811,41 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Approvals: kept=true, ensure Cloudinary upload present; then processed=true and enqueue artwork
     if (approveIds.length > 0) {
-      // Set kept=true upfront
+      // Set kept=true upfront for all approvals
       await db('photos').whereIn('id', approveIds).update({ kept: true });
 
-      // Upload missing Cloudinary assets
-      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
-      for (const p of needUpload) {
-        const { public_id, secure_url } = await uploadImage(p.src_url, {
-          folder: 'art-factory/source',
-          publicId: `source_${p.id}`,
-          overwrite: false
-        });
-        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
-        uploadedToCloudinary++;
+      // Separate those that already have assets vs need upload
+      const approveRows = rows.filter(r => approveIds.includes(r.id));
+      const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
+      const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // For those with existing assets: mark processed and enqueue
+      if (haveAssets.length > 0) {
+        await db('photos').whereIn('id', haveAssets).update({ processed: true });
+        await Promise.all(
+          haveAssets.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+        );
+        enqueuedArtwork += haveAssets.length;
       }
 
-      // Mark processed and enqueue artwork jobs
-      await db('photos').whereIn('id', approveIds).update({ processed: true });
-
-      await Promise.all(
-        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
-      );
-      enqueuedArtwork = approveIds.length;
+      // For those needing upload: try per-item; on failure delete and continue
+      for (const p of needUpload) {
+        try {
+          const { public_id, secure_url } = await uploadImage(p.src_url, {
+            folder: 'art-factory/source',
+            publicId: `source_${p.id}`,
+            overwrite: false
+          });
+          await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url, processed: true });
+          uploadedToCloudinary++;
+          await qArtwork.add('artwork', { photoId: p.id }, { jobId: `artwork:${p.id}` });
+          enqueuedArtwork++;
+        } catch (e) {
+          // Upload failed: delete the photo and move on
+          await db('photos').where({ id: p.id }).del();
+          deletedDueToUploadFailure++;
+        }
+      }
     }
 
     if (typeof req.log === 'function') {
@@ -1801,6 +1857,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
         rejected: rejectIds.length,
         uploadedToCloudinary,
         enqueuedArtwork,
+        deletedDueToUploadFailure,
         duration_ms: Date.now() - t0
       });
     }
@@ -1810,7 +1867,8 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
       approved: approveIds.length,
       rejected: rejectIds.length,
       uploadedToCloudinary,
-      enqueuedArtwork
+      enqueuedArtwork,
+      deletedDueToUploadFailure
     });
   } catch (err) {
     next(err);
@@ -1838,17 +1896,28 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
 
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
-    // Approve: mark kept, ensure upload, then enqueue artwork
+    // Approve: mark kept; if Cloudinary upload fails, delete and move on
     await db('photos').where({ id }).update({ kept: true });
 
-    if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
+    let hasAssets = Boolean(photo.cloudinary_id && photo.secure_url);
+    if (!hasAssets) {
+      try {
+        const { public_id, secure_url } = await uploadImage(photo.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${photo.id}`,
+          overwrite: false
+        });
+        await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary = true;
+        hasAssets = true;
+      } catch (e) {
+        // Upload failed: delete the photo and return ok
+        await db('photos').where({ id }).del();
+        if (typeof req.log === 'function') {
+          req.log({ event: 'moderate_photo', photoId: id, action: 'approve', deletedDueToUploadFailure: true });
+        }
+        return res.json({ ok: true, status: 'deleted' });
+      }
     }
 
     await db('photos').where({ id }).update({ processed: true });
@@ -1976,10 +2045,29 @@ async function j(url, opts={}) {
 
 function cardHTML(p) {
   // default to PASS regardless of previous kept value
+  const src = p?.ov_thumbnail || p?.thumbnail_url || p?.src_url;
+  if (!p?.ov_thumbnail && !p?.thumbnail_url) {
+    try {
+      console.warn('ui_thumb_fallback_fullres', {
+        id: p?.id,
+        provider: p?.ov_provider || p?.provider || null,
+        hasOvThumb: !!p?.ov_thumbnail,
+        hasLegacyThumb: !!p?.thumbnail_url,
+        srcUrl: p?.src_url
+      });
+    } catch (_) {}
+  } else {
+    try {
+      console.info('ui_thumb_used', {
+        id: p?.id,
+        used: p?.ov_thumbnail ? 'ov_thumbnail' : 'thumbnail_url'
+      });
+    } catch (_) {}
+  }
   return \`
   <div class="card" id="card-\${p.id}" data-id="\${p.id}">
     <div class="strike"></div>
-    <img class="img" src="\${p.src_url}" alt=""/>
+    <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
       <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
       <div class="badge pass">PASS</div>
@@ -2039,7 +2127,7 @@ nextBtn.addEventListener('click', async () => {
       const kept = el ? !el.classList.contains('fail') : true;
       return { id: p.id, kept };
     });
-    await fetch('/moderate/location/' + current.location.id, {
+    await j('/moderate/location/' + current.location.id, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2061,7 +2149,7 @@ async function loadNext() {
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
-  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId) + '&t=' + Date.now());
   if (data.done) {
     current = { location: null, photos: [] };
     remainingWrap.style.display = 'none';
@@ -2196,6 +2284,7 @@ export function createApp() {
         name: err?.name,
         message: err?.message,
         stack: err?.stack,
+        context: err?.context || err?.extraContext,
       };
       console.error(JSON.stringify(payload));
     } catch (_) {
@@ -2592,13 +2681,14 @@ import fetch from 'node-fetch';
 
 /**
  * Search Google Images (Custom Search API) for a query and return results.
- * Expects GOOGLE_API_KEY and GOOGLE_CX in environment variables.
+ * Expects GOOGLE_API_KEY and either GOOGLE_CSE_ID or GOOGLE_CX in environment variables.
  */
 export async function imageSearch(query, num = 10) {
   const apiKey = process.env.GOOGLE_API_KEY;
-  const cx = process.env.GOOGLE_CX;
+  const cx = process.env.GOOGLE_CSE_ID || process.env.GOOGLE_CX;
   if (!apiKey || !cx) {
-    throw new Error('Google API key (GOOGLE_API_KEY) or CX (GOOGLE_CX) not set');
+    console.warn('[Google imageSearch] Missing GOOGLE_API_KEY or GOOGLE_CSE_ID/GOOGLE_CX; returning no results');
+    return [];
   }
   const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
     query
@@ -4439,6 +4529,7 @@ export default async function photos(job) {
 
         // Persist Openverse metadata if present
         if (img.id) {
+          // Legacy column family (pre-ov_*)
           insertData.openverse_id = img.id || null;
           insertData.title = img.title || null;
           insertData.creator = img.creator || null;
@@ -4453,7 +4544,44 @@ export default async function photos(job) {
           insertData.detail_url = img.detail_url || null;
           insertData.width = img.width || null;
           insertData.height = img.height || null;
+
+          // Newer ov_* column family for parity with schema.sql
+          insertData.ov_id = img.id || null;
+          insertData.ov_title = img.title || null;
+          insertData.ov_creator = img.creator || null;
+          insertData.ov_creator_url = img.creator_url || null;
+          insertData.ov_license = img.license || null;
+          insertData.ov_license_version = img.license_version || null;
+          insertData.ov_license_url = img.license_url || null;
+          insertData.ov_source = img.source || null;
+          insertData.ov_category = img.category || null;
+          insertData.ov_provider = img.provider || null;
+          insertData.ov_thumbnail = img.thumbnail || null;
+          insertData.ov_detail_url = img.detail_url || null;
+          insertData.ov_width = img.width || null;
+          insertData.ov_height = img.height || null;
+
           insertData.openverse_metadata = img || {};
+
+          // Ingestion-side logging for diagnostics
+          try {
+            console.log(JSON.stringify({
+              event: 'ingest_openverse_photo',
+              locationId,
+              srcUrl,
+              ov_id: img.id || null,
+              provider: img.provider || null,
+              hasThumbnail: Boolean(img.thumbnail)
+            }));
+            if (!img.thumbnail) {
+              console.warn(JSON.stringify({
+                event: 'ingest_openverse_missing_thumbnail',
+                locationId,
+                srcUrl,
+                ov_id: img.id || null
+              }));
+            }
+          } catch (_) {}
         }
 
         const insert = await db('photos')
@@ -4478,6 +4606,14 @@ export default async function photos(job) {
 
       // Build user payload: use thumbnail when available; fall back to srcUrl
       const thumbUrl = img?.thumbnail || img?.thumbnail_url || srcUrl;
+      try {
+        console.log(JSON.stringify({
+          event: 'ingest_thumb_choice',
+          locationId,
+          srcUrl,
+          used: img?.thumbnail ? 'thumbnail' : (img?.thumbnail_url ? 'thumbnail_url' : 'src_url')
+        }));
+      } catch (_) {}
       const userText = typeof userTemplate === 'string'
         ? userTemplate.replace('{{imageUrl}}', thumbUrl)
         : '';
@@ -4802,6 +4938,15 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 
+// Disable ETag and force no-store to avoid 304 caching on dynamic endpoints
+app.set('etag', false);
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // ---------- Basic structured request logging ----------
 app.use((req, res, next) => {
   const start = Date.now();
@@ -4924,10 +5069,29 @@ async function j(url, opts={}) {
 
 function cardHTML(p) {
   // default to PASS regardless of previous kept value
+  const src = p?.ov_thumbnail || p?.thumbnail_url || p?.src_url;
+  if (!p?.ov_thumbnail && !p?.thumbnail_url) {
+    try {
+      console.warn('ui_thumb_fallback_fullres', {
+        id: p?.id,
+        provider: p?.ov_provider || p?.provider || null,
+        hasOvThumb: !!p?.ov_thumbnail,
+        hasLegacyThumb: !!p?.thumbnail_url,
+        srcUrl: p?.src_url
+      });
+    } catch (_) {}
+  } else {
+    try {
+      console.info('ui_thumb_used', {
+        id: p?.id,
+        used: p?.ov_thumbnail ? 'ov_thumbnail' : 'thumbnail_url'
+      });
+    } catch (_) {}
+  }
   return \`
   <div class="card" id="card-\${p.id}" data-id="\${p.id}">
     <div class="strike"></div>
-    <img class="img" src="\${p.src_url}" alt=""/>
+    <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
       <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
       <div class="badge pass">PASS</div>
@@ -4984,7 +5148,7 @@ nextBtn.addEventListener('click', async () => {
       const kept = el ? !el.classList.contains('fail') : true;
       return { id: p.id, kept };
     });
-    await fetch('/moderate/location/' + current.location.id, {
+    await j('/moderate/location/' + current.location.id, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -5006,7 +5170,7 @@ async function loadNext() {
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
-  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId));
+  const data = await j('/admin/photos/next?catchmentId=' + encodeURIComponent(catchmentId) + '&t=' + Date.now());
   if (data.done) {
     current = { location: null, photos: [] };
     remainingWrap.style.display = 'none';
@@ -5138,6 +5302,9 @@ app.get('/admin/photos/next', async (req, res, next) => {
       });
     }
 
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
   } catch (err) {
     next(err);
@@ -5168,13 +5335,22 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     await db('photos').where({ id }).update({ kept: true });
 
     if (!photo.cloudinary_id || !photo.secure_url) {
-      const { public_id, secure_url } = await uploadImage(photo.src_url, {
-        folder: 'art-factory/source',
-        publicId: `source_${photo.id}`,
-        overwrite: false,
-      });
-      await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
-      uploadedToCloudinary = true;
+      try {
+        const { public_id, secure_url } = await uploadImage(photo.src_url, {
+          folder: 'art-factory/source',
+          publicId: `source_${photo.id}`,
+          overwrite: false,
+        });
+        await db('photos').where({ id }).update({ cloudinary_id: public_id, secure_url });
+        uploadedToCloudinary = true;
+      } catch (e) {
+        // Upload failed: delete the photo and return ok
+        await db('photos').where({ id }).del();
+        if (typeof req.log === 'function') {
+          req.log({ event: 'moderate_photo', photoId: id, action: 'approve', deletedDueToUploadFailure: true });
+        }
+        return res.json({ ok: true, status: 'deleted' });
+      }
     }
 
     await db('photos').where({ id }).update({ processed: true });
@@ -5221,31 +5397,47 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
+    let deletedDueToUploadFailure = 0;
 
     if (rejectIds.length > 0) {
       await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
     }
 
     if (approveIds.length > 0) {
+      // Mark approvals as kept
       await db('photos').whereIn('id', approveIds).update({ kept: true });
 
-      const needUpload = rows.filter(r => approveIds.includes(r.id) && (!r.cloudinary_id || !r.secure_url));
-      for (const p of needUpload) {
-        const { public_id, secure_url } = await uploadImage(p.src_url, {
-          folder: 'art-factory/source',
-          publicId: `source_${p.id}`,
-          overwrite: false
-        });
-        await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url });
-        uploadedToCloudinary++;
+      const approveRows = rows.filter(r => approveIds.includes(r.id));
+      const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
+      const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Already have assets: mark processed + enqueue
+      if (haveAssets.length > 0) {
+        await db('photos').whereIn('id', haveAssets).update({ processed: true });
+        await Promise.all(
+          haveAssets.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
+        );
+        enqueuedArtwork += haveAssets.length;
       }
 
-      await db('photos').whereIn('id', approveIds).update({ processed: true });
-
-      await Promise.all(
-        approveIds.map(id => qArtwork.add('artwork', { photoId: id }, { jobId: `artwork:${id}` }))
-      );
-      enqueuedArtwork = approveIds.length;
+      // Missing assets: try upload; on failure delete and continue
+      for (const p of needUpload) {
+        try {
+          const { public_id, secure_url } = await uploadImage(p.src_url, {
+            folder: 'art-factory/source',
+            publicId: `source_${p.id}`,
+            overwrite: false
+          });
+          await db('photos').where({ id: p.id }).update({ cloudinary_id: public_id, secure_url, processed: true });
+          uploadedToCloudinary++;
+          await qArtwork.add('artwork', { photoId: p.id }, { jobId: `artwork:${p.id}` });
+          enqueuedArtwork++;
+        } catch (e) {
+          // Upload failed (e.g., >10MB): delete the photo and move on
+          await db('photos').where({ id: p.id }).del();
+          deletedDueToUploadFailure++;
+        }
+      }
     }
 
     if (typeof req.log === 'function') {
@@ -5257,6 +5449,7 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
         rejected: rejectIds.length,
         uploadedToCloudinary,
         enqueuedArtwork,
+        deletedDueToUploadFailure,
         duration_ms: Date.now() - t0
       });
     }
@@ -5266,7 +5459,8 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
       approved: approveIds.length,
       rejected: rejectIds.length,
       uploadedToCloudinary,
-      enqueuedArtwork
+      enqueuedArtwork,
+      deletedDueToUploadFailure
     });
   } catch (err) {
     next(err);

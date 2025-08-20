@@ -100,14 +100,15 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.ov_source',
         'p.ov_category',
         'p.ov_provider',
-        db.raw('coalesce(p.ov_thumbnail, p.thumbnail_url) as ov_thumbnail'),
-        db.raw('coalesce(p.ov_detail_url, p.detail_url) as ov_detail_url'),
+        db.raw("coalesce(p.ov_thumbnail, p.thumbnail_url, p.openverse_metadata->>'thumbnail_url', p.openverse_metadata->>'thumbnail') as ov_thumbnail"),
+        db.raw("coalesce(p.ov_detail_url, p.detail_url, p.openverse_metadata->>'detail_url', p.openverse_metadata->>'foreign_landing_url') as ov_detail_url"),
         'p.ov_width',
         'p.ov_height',
         // include legacy fields for diagnostics
         'p.thumbnail_url',
         'p.detail_url',
-        'p.provider'
+        'p.provider',
+        'p.openverse_metadata'
       );
 
     const remainingRow = await db('photos as p')
