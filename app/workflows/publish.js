@@ -4,6 +4,24 @@ import { env } from '../config/env.js';
 import { createProductRaw, setMetafieldsGraphQL, setProductMetafieldsREST } from '../services/shopify.js';
 const { sendProduct } = n8n;
 
+function parseFormattedAddress(addr) {
+  if (!addr || typeof addr !== 'string') return { country: '', state: '', city: '' };
+  const parts = addr.split(',').map(s => s.trim()).filter(Boolean);
+  const country = parts.at(-1) || '';
+  let state = '', city = '';
+  if (parts.length >= 2) {
+    const mid = parts.at(-2);
+    const m = mid.match(/\b([A-Z]{2})\b/); // US state code heuristic
+    if (m) {
+      state = m[1];
+      city = parts.at(-3) || '';
+    } else {
+      city = mid; // non‑US best-effort
+    }
+  }
+  return { country, state, city };
+}
+
 export default async function publish(job) {
   const { artworkId } = job.data;
 
@@ -23,7 +41,10 @@ export default async function publish(job) {
       location_category: 'l.category',
       formatted_address: 'l.address',
       latitude: 'l.g_lat',
-      longitude: 'l.g_lng'
+      longitude: 'l.g_lng',
+      g_place_id: 'l.g_place_id',
+      g_formatted_address: 'l.g_formatted_address',
+      image_source: 'l.image_source'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -112,7 +133,7 @@ export default async function publish(job) {
       namespace: 'location',
       key: 'geo',
       type: 'json',
-      value: JSON.stringify({ lat: row.catchment_lat, lon: row.catchment_lon }),
+      value: JSON.stringify({ lat: row.latitude, lon: row.longitude }),
     },
     {
       namespace: 'location',
@@ -132,6 +153,8 @@ export default async function publish(job) {
   const tags = [row.location_name, 'Bomberg', 'generated'].filter(Boolean);
 
   // Build payload in n8n expected format
+  const primaryImage = (Array.isArray(images) && images[0]?.src) ? images[0].src : (art.image_url || (Array.isArray(mockups) && mockups[0]) || row.image_source || '');
+  const { country, state, city } = parseFormattedAddress(row.g_formatted_address);
   const payload = {
     product: {
       title,
@@ -159,17 +182,17 @@ export default async function publish(job) {
       ]
     },
     location_title: row.location_name || '',
-    google_id: '', // not present in schema
-    country: '',   // not in schema
-    state: '',     // not in schema
-    city: '',      // not in schema
-    formatted_address: row.formatted_address || '',
+    google_id: row.g_place_id || '',
+    country: country || '',
+    state: state || '',
+    city: city || '',
+    formatted_address: row.g_formatted_address || row.formatted_address || '',
     latitude: row.latitude ?? '',
     longitude: row.longitude ?? '',
     location_category: row.location_category || '',
     location_description: row.location_description || '',
-    location_photo: row.image_source || '', // from schema
-    style_name: '',
+    location_photo: primaryImage || '',
+    style_name: 'Bomberg',
     uuid: String(artworkId),
     featured: art.featured || ''
   };
