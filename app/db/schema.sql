@@ -45,6 +45,10 @@ create unique index if not exists catchments_shopify_unique
 
 create index if not exists idx_catchments_created_at on catchments(created_at);
 
+-- Backfill column for image source on existing catchments
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS image_source text;
+
 -- ===================== 2. Locations ======================
 create table if not exists locations (
   id           uuid primary key default gen_random_uuid(),
@@ -79,6 +83,21 @@ create unique index if not exists locations_unique_place_per_catchment
 
 -- Fast retrieval by creation time
 create index if not exists idx_locations_created_at on locations(created_at);
+
+-- Backfill Google Places enrichment and source columns for existing locations rows
+ALTER TABLE locations
+  ADD COLUMN IF NOT EXISTS image_source text,
+  ADD COLUMN IF NOT EXISTS g_place_id text,
+  ADD COLUMN IF NOT EXISTS g_name text,
+  ADD COLUMN IF NOT EXISTS g_formatted_address text,
+  ADD COLUMN IF NOT EXISTS g_phone text,
+  ADD COLUMN IF NOT EXISTS g_website text,
+  ADD COLUMN IF NOT EXISTS g_lat numeric,
+  ADD COLUMN IF NOT EXISTS g_lng numeric,
+  ADD COLUMN IF NOT EXISTS g_rating numeric,
+  ADD COLUMN IF NOT EXISTS g_user_ratings_total integer,
+  ADD COLUMN IF NOT EXISTS g_types text,
+  ADD COLUMN IF NOT EXISTS g_photo_refs jsonb DEFAULT '[]'::jsonb;
 
 -- ===================== 3. Photos =========================
 create table if not exists photos (
