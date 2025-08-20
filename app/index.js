@@ -155,10 +155,29 @@ async function j(url, opts={}) {
 
 function cardHTML(p) {
   // default to PASS regardless of previous kept value
+  const src = p?.ov_thumbnail || p?.thumbnail_url || p?.src_url;
+  if (!p?.ov_thumbnail && !p?.thumbnail_url) {
+    try {
+      console.warn('ui_thumb_fallback_fullres', {
+        id: p?.id,
+        provider: p?.ov_provider || p?.provider || null,
+        hasOvThumb: !!p?.ov_thumbnail,
+        hasLegacyThumb: !!p?.thumbnail_url,
+        srcUrl: p?.src_url
+      });
+    } catch (_) {}
+  } else {
+    try {
+      console.info('ui_thumb_used', {
+        id: p?.id,
+        used: p?.ov_thumbnail ? 'ov_thumbnail' : 'thumbnail_url'
+      });
+    } catch (_) {}
+  }
   return \`
   <div class="card" id="card-\${p.id}" data-id="\${p.id}">
     <div class="strike"></div>
-    <img class="img" src="\${p.ov_thumbnail || p.src_url}" alt=""/>
+    <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
       <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
       <div class="badge pass">PASS</div>

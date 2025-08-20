@@ -100,10 +100,14 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.ov_source',
         'p.ov_category',
         'p.ov_provider',
-        'p.ov_thumbnail',
-        'p.ov_detail_url',
+        db.raw('coalesce(p.ov_thumbnail, p.thumbnail_url) as ov_thumbnail'),
+        db.raw('coalesce(p.ov_detail_url, p.detail_url) as ov_detail_url'),
         'p.ov_width',
-        'p.ov_height'
+        'p.ov_height',
+        // include legacy fields for diagnostics
+        'p.thumbnail_url',
+        'p.detail_url',
+        'p.provider'
       );
 
     const remainingRow = await db('photos as p')
@@ -114,12 +118,18 @@ router.get('/admin/photos/next', async (req, res, next) => {
     const remaining = Number(remainingRow?.c ?? 0);
 
     if (typeof req.log === 'function') {
+      const thumbSummary = {
+        ovThumb: photos.filter(p => p.ov_thumbnail).length,
+        legacyThumb: photos.filter(p => !p.ov_thumbnail && p.thumbnail_url).length,
+        noThumb: photos.filter(p => !p.ov_thumbnail && !p.thumbnail_url).length
+      };
       req.log({
         event: 'admin_photos_next',
         catchmentId,
         locationId: loc.id,
         photos: photos.length,
         remaining,
+        thumbSummary,
         duration_ms: Date.now() - t0
       });
     }

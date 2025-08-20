@@ -86,6 +86,7 @@ export default async function photos(job) {
 
         // Persist Openverse metadata if present
         if (img.id) {
+          // Legacy column family (pre-ov_*)
           insertData.openverse_id = img.id || null;
           insertData.title = img.title || null;
           insertData.creator = img.creator || null;
@@ -100,7 +101,44 @@ export default async function photos(job) {
           insertData.detail_url = img.detail_url || null;
           insertData.width = img.width || null;
           insertData.height = img.height || null;
+
+          // Newer ov_* column family for parity with schema.sql
+          insertData.ov_id = img.id || null;
+          insertData.ov_title = img.title || null;
+          insertData.ov_creator = img.creator || null;
+          insertData.ov_creator_url = img.creator_url || null;
+          insertData.ov_license = img.license || null;
+          insertData.ov_license_version = img.license_version || null;
+          insertData.ov_license_url = img.license_url || null;
+          insertData.ov_source = img.source || null;
+          insertData.ov_category = img.category || null;
+          insertData.ov_provider = img.provider || null;
+          insertData.ov_thumbnail = img.thumbnail || null;
+          insertData.ov_detail_url = img.detail_url || null;
+          insertData.ov_width = img.width || null;
+          insertData.ov_height = img.height || null;
+
           insertData.openverse_metadata = img || {};
+
+          // Ingestion-side logging for diagnostics
+          try {
+            console.log(JSON.stringify({
+              event: 'ingest_openverse_photo',
+              locationId,
+              srcUrl,
+              ov_id: img.id || null,
+              provider: img.provider || null,
+              hasThumbnail: Boolean(img.thumbnail)
+            }));
+            if (!img.thumbnail) {
+              console.warn(JSON.stringify({
+                event: 'ingest_openverse_missing_thumbnail',
+                locationId,
+                srcUrl,
+                ov_id: img.id || null
+              }));
+            }
+          } catch (_) {}
         }
 
         const insert = await db('photos')
@@ -125,6 +163,14 @@ export default async function photos(job) {
 
       // Build user payload: use thumbnail when available; fall back to srcUrl
       const thumbUrl = img?.thumbnail || img?.thumbnail_url || srcUrl;
+      try {
+        console.log(JSON.stringify({
+          event: 'ingest_thumb_choice',
+          locationId,
+          srcUrl,
+          used: img?.thumbnail ? 'thumbnail' : (img?.thumbnail_url ? 'thumbnail_url' : 'src_url')
+        }));
+      } catch (_) {}
       const userText = typeof userTemplate === 'string'
         ? userTemplate.replace('{{imageUrl}}', thumbUrl)
         : '';
