@@ -1724,14 +1724,15 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.ov_source',
         'p.ov_category',
         'p.ov_provider',
-        db.raw('coalesce(p.ov_thumbnail, p.thumbnail_url) as ov_thumbnail'),
-        db.raw('coalesce(p.ov_detail_url, p.detail_url) as ov_detail_url'),
+        db.raw("coalesce(p.ov_thumbnail, p.thumbnail_url, p.openverse_metadata->>'thumbnail_url', p.openverse_metadata->>'thumbnail') as ov_thumbnail"),
+        db.raw("coalesce(p.ov_detail_url, p.detail_url, p.openverse_metadata->>'detail_url', p.openverse_metadata->>'foreign_landing_url') as ov_detail_url"),
         'p.ov_width',
         'p.ov_height',
         // include legacy fields for diagnostics
         'p.thumbnail_url',
         'p.detail_url',
-        'p.provider'
+        'p.provider',
+        'p.openverse_metadata'
       );
 
     const remainingRow = await db('photos as p')
@@ -2045,25 +2046,29 @@ async function j(url, opts={}) {
 
 function cardHTML(p) {
   // default to PASS regardless of previous kept value
-  const src = p?.ov_thumbnail || p?.thumbnail_url || p?.src_url;
-  if (!p?.ov_thumbnail && !p?.thumbnail_url) {
-    try {
+  const computedOvThumb = (!p?.ov_thumbnail && p?.ov_id)
+    ? \`https://api.openverse.org/v1/images/\${p.ov_id}/thumb/\`
+    : null;
+  const src = p?.ov_thumbnail || p?.thumbnail_url || computedOvThumb || p?.src_url;
+
+  try {
+    if (src === p?.src_url) {
       console.warn('ui_thumb_fallback_fullres', {
         id: p?.id,
         provider: p?.ov_provider || p?.provider || null,
-        hasOvThumb: !!p?.ov_thumbnail,
+        hasOvThumb: !!p?.ov_thumbnail || !!computedOvThumb,
         hasLegacyThumb: !!p?.thumbnail_url,
+        ov_id: p?.ov_id || null,
         srcUrl: p?.src_url
       });
-    } catch (_) {}
-  } else {
-    try {
+    } else {
       console.info('ui_thumb_used', {
         id: p?.id,
-        used: p?.ov_thumbnail ? 'ov_thumbnail' : 'thumbnail_url'
+        used: p?.ov_thumbnail ? 'ov_thumbnail' : (p?.thumbnail_url ? 'thumbnail_url' : 'computed_ov_thumb')
       });
-    } catch (_) {}
-  }
+    }
+  } catch (_) {}
+
   return \`
   <div class="card" id="card-\${p.id}" data-id="\${p.id}">
     <div class="strike"></div>

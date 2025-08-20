@@ -196,3 +196,92 @@ export async function createProduct({
   log({ event: 'create_product_done', traceId, productId: created.id });
   return created.id; // backward compatible
 }
+
+/**
+ * Create a product using a raw Shopify-compatible product object.
+ * Returns the full created product object (including id, admin_graphql_api_id, images).
+ *
+ * @param {Object} productBody - The object that would normally be under { product: ... }
+ * @returns {Promise<Object>} - The created product object from Shopify
+ */
+export async function createProductRaw(productBody) {
+  if (!productBody || typeof productBody !== 'object') {
+    throw new Error('createProductRaw: productBody is required');
+  }
+
+  const traceId = randomUUID();
+  log({ event: 'create_product_raw_start', traceId });
+
+  const body = JSON.stringify({ product: productBody });
+  const data = await fetchJson('/products.json', { method: 'POST', body });
+  const created = data?.product;
+  log({ event: 'create_product_raw_res', traceId, hasId: Boolean(created?.id) });
+  if (!created?.id) throw new Error('Shopify did not return product.id');
+  log({ event: 'create_product_raw_success', traceId, productId: created.id });
+
+  return created;
+}
+
+/**
+ * Set metafields via Admin GraphQL metafieldsSet mutation.
+ *
+ * @param {string} ownerId - The admin_graphql_api_id for the Product (or GID fallback)
+ * @param {Array<{namespace:string,key:string,type:string,value:string}>} metafields
+ * @returns {Promise<Object>} - GraphQL response metafieldsSet payload
+ * Throws when env.requireMetafieldsSuccess is true and userErrors are returned.
+ */
+export async function setMetafieldsGraphQL(ownerId, metafields) {
+  if (!ownerId) throw new Error('setMetafieldsGraphQL: ownerId is required');
+  const traceId = randomUUID();
+
+  const meta = Array.isArray(metafields)
+    ? metafields.filter(m => m && m.namespace && m.key && m.type)
+    : [];
+
+  if (!meta.length) {
+    log({ event: 'graphql_metafields_set_skipped', traceId, reason: 'no_valid_metafields' });
+    return { metafields: [], userErrors: [] };
+  }
+
+  const query = `
+    mutation setMeta($meta: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $meta) {
+        metafields { id key namespace value }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    meta: meta.map(m => ({
+      ownerId,
+      namespace: m.namespace,
+      key: m.key,
+      type: m.type,
+      value: String(m.value ?? ''),
+    })),
+  };
+
+  const body = JSON.stringify({ query, variables });
+  const res = await fetchJson('/graphql.json', { method: 'POST', body });
+
+  // n8n referenced shape: { data: { metafieldsSet: { metafields, userErrors } } }
+  const out = res?.data?.metafieldsSet || res?.metafieldsSet || res;
+  const userErrors = Array.isArray(out?.userErrors) ? out.userErrors : [];
+
+  log({
+    event: 'graphql_metafields_set_res',
+    traceId,
+    errors: userErrors.map(e => ({ field: e.field, message: e.message })),
+  });
+
+  if (userErrors.length && env.requireMetafieldsSuccess) {
+    const errMsg = JSON.stringify(userErrors);
+    const err = new Error(`Shopify metafieldsSet returned userErrors: ${errMsg}`);
+    // Preserve context for upstream logs
+    err.context = { ownerId, userErrors };
+    throw err;
+  }
+
+  return out;
+}

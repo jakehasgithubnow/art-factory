@@ -60,6 +60,9 @@ export const env = {
   shop: optional('SHOPIFY_SHOP'),
   shopToken: optional('SHOPIFY_ACCESS_TOKEN'),
   shopifyVersion: optional('SHOPIFY_API_VERSION', '2024-04'),
+  // Feature flags for Shopify publish orchestration
+  createViaN8n: bool('SHOPIFY_CREATE_VIA_N8N', true),
+  requireMetafieldsSuccess: bool('SHOPIFY_REQUIRE_METAFIELDS_SUCCESS', false),
 
   // Queues & workers (mirrors defaults in queues/workers)
   queuePrefix: optional('QUEUE_PREFIX', 'art-factory'),

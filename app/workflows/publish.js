@@ -1,5 +1,7 @@
 import db from '../db/client.js';
 import * as n8n from '../services/n8n.js';
+import { env } from '../config/env.js';
+import { createProductRaw, setMetafieldsGraphQL } from '../services/shopify.js';
 const { sendProduct } = n8n;
 
 export default async function publish(job) {
@@ -172,15 +174,71 @@ export default async function publish(job) {
     featured: art.featured || ''
   };
 
-  try {
-    await sendProduct(payload);
-  } catch (err) {
-    console.error('publish: sendProduct to n8n failed', { artworkId, err });
-    throw err;
-  }
+  if (env.createViaN8n) {
+    try {
+      await sendProduct(payload);
+    } catch (err) {
+      console.error('publish: sendProduct to n8n failed', { artworkId, err });
+      throw err;
+    }
+    // Mark as published/idempotent once webhook has been successfully sent
+    await db('artwork')
+      .where({ id: artworkId })
+      .update({ published: true });
+  } else {
+    // Internal Shopify path (in-app, replacing n8n)
+    let created;
+    try {
+      created = await createProductRaw(payload.product);
+    } catch (err) {
+      console.error('publish: createProductRaw failed', { artworkId, err });
+      throw err;
+    }
 
-  // Mark as published/idempotent once webhook has been successfully sent
-  await db('artwork')
-    .where({ id: artworkId })
-    .update({ published: true });
+    // Persist Shopify ID and mark as published after successful create
+    try {
+      await db('artwork')
+        .where({ id: artworkId })
+        .update({ shopify_id: String(created.id), published: true });
+    } catch (err) {
+      // Avoid throwing here to prevent duplicate product creation on retry.
+      console.error('publish: DB update failed after Shopify create', { artworkId, createdId: created?.id, err });
+    }
+
+    // Build metafields mirroring previous n8n flow
+    const ownerId = created.admin_graphql_api_id || `gid://shopify/Product/${created.id}`;
+
+    const details = {
+      title: payload.location_title,
+      google_id: payload.google_id || '',
+      country: payload.country || '',
+      state: payload.state || '',
+      city: payload.city || '',
+      formatted_address: payload.formatted_address || '',
+      category: payload.location_category || '',
+      description: payload.location_description || '',
+      location_photo: payload.location_photo || '',
+      style_name: payload.style_name || '',
+    };
+    const lat = Number.parseFloat(payload.latitude);
+    if (Number.isFinite(lat)) details.latitude = lat;
+    const lon = Number.parseFloat(payload.longitude);
+    if (Number.isFinite(lon)) details.longitude = lon;
+
+    const meta = [
+      { namespace: 'location', key: 'details', type: 'json', value: JSON.stringify(details) },
+    ];
+    const imgs = Array.isArray(created.images) ? created.images : [];
+    if (imgs[1]?.src) meta.push({ namespace: 'images', key: 'image2', type: 'single_line_text_field', value: String(imgs[1].src) });
+    if (imgs[2]?.src) meta.push({ namespace: 'images', key: 'image3', type: 'single_line_text_field', value: String(imgs[2].src) });
+    if (imgs[3]?.src) meta.push({ namespace: 'images', key: 'image4', type: 'single_line_text_field', value: String(imgs[3].src) });
+    if (payload.featured) meta.push({ namespace: 'notes', key: 'features', type: 'single_line_text_field', value: String(payload.featured) });
+
+    try {
+      await setMetafieldsGraphQL(ownerId, meta);
+    } catch (err) {
+      console.error('publish: setMetafieldsGraphQL failed', { artworkId, ownerId, err });
+      if (env.requireMetafieldsSuccess) throw err;
+    }
+  }
 }
