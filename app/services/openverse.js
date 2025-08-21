@@ -1,7 +1,6 @@
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
-import { rankAndTrim, DEFAULT_RANK_OPTIONS } from './imageRanker.js';
 
 const STAGE = 'openverse_image_search';
 function log(data = {}) {
@@ -19,7 +18,7 @@ function log(data = {}) {
 }
 
 /**
- * Search Openverse images, then apply a fast heuristic ranking to return the top-N.
+ * Search Openverse images and return the first top-N results (unranked).
  * Mirrors the interface of google.imageSearch for interchangeability.
  *
  * @param {string} query - Search term.
@@ -147,29 +146,17 @@ export async function imageSearch(query, num = 10, options = {}) {
 
     if (all.length === 0) return [];
 
-    if (disableRanking) {
-      const sliced = all.slice(0, target);
-      log({
-        event: 'return_unranked',
-        traceId,
-        count: sliced.length,
-        reason: 'disableRanking',
-      });
-      return sliced;
-    }
-
-    // Rank and trim to top-N using heuristics
-    const ranked = rankAndTrim(all, query, { ...DEFAULT_RANK_OPTIONS, ...rankOptions }, target);
-
+    // Heuristic ranker removed: always return unranked first-N
+    const sliced = all.slice(0, target);
     log({
-      event: 'success_ranked',
+      event: 'return_unranked',
       traceId,
+      count: sliced.length,
+      reason: 'ranking_removed',
       candidate_count: all.length,
-      top_count: ranked.length,
       duration_ms: Date.now() - start,
     });
-
-    return ranked;
+    return sliced;
   } catch (err) {
     log({ event: 'error', traceId, name: err?.name, message: err?.message });
     throw err;
