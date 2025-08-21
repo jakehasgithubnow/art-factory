@@ -67,7 +67,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
           .andWhere('p.processed', false);
       })
       .orderBy('l.created_at', 'asc')
-      .select('l.id', 'l.name')
+      .select('l.id', 'l.name', 'l.search_term')
       .first();
 
     if (!loc) {
@@ -135,7 +135,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
       });
     }
 
-    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+    res.json({ location: { id: loc.id, name: loc.name, search_term: loc.search_term }, photos, remaining });
   } catch (err) {
     next(err);
   }

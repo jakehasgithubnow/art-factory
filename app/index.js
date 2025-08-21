@@ -110,6 +110,7 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   <div class="row">
     <div class="muted small">Catchment: ${catchmentId}</div>
     <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="searchTermWrap" style="display:none">Openverse search: <span id="searchTerm">—</span></div>
     <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
   </div>
   <div style="margin:10px 0">
@@ -140,6 +141,8 @@ const grid = document.getElementById('grid');
 const locNameEl = document.getElementById('locName');
 const remainingWrap = document.getElementById('remainingWrap');
 const remainingEl = document.getElementById('remaining');
+const searchTermWrap = document.getElementById('searchTermWrap');
+const searchTermEl = document.getElementById('searchTerm');
 const passCountEl = document.getElementById('passCount');
 const failCountEl = document.getElementById('failCount');
 const nextBtn = document.getElementById('nextBtn');
@@ -188,6 +191,14 @@ function cardHTML(p) {
 function render() {
   if (!current.location) return;
   locNameEl.textContent = current.location.name || '—';
+  const st = current.location.search_term || '';
+  if (st) {
+    searchTermWrap.style.display = 'inline-flex';
+    searchTermEl.textContent = st;
+  } else {
+    searchTermWrap.style.display = 'none';
+    searchTermEl.textContent = '—';
+  }
   grid.innerHTML = current.photos.map(cardHTML).join('');
   doneEl.style.display = 'none';
   updateCounts();
@@ -253,6 +264,8 @@ nextBtn.addEventListener('click', async () => {
 
 async function loadNext() {
   locNameEl.textContent = '…';
+  searchTermWrap.style.display = 'none';
+  searchTermEl.textContent = '…';
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
@@ -333,7 +346,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
           .andWhere('p.processed', false);
       })
       .orderBy('l.created_at', 'asc')
-      .select('l.id', 'l.name')
+      .select('l.id', 'l.name', 'l.search_term')
       .first();
 
     if (!loc) {
@@ -391,7 +404,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+    res.json({ location: { id: loc.id, name: loc.name, search_term: loc.search_term }, photos, remaining });
   } catch (err) {
     next(err);
   }
