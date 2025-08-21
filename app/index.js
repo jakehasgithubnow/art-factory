@@ -343,7 +343,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
         this.select(1)
           .from('photos as p')
           .whereRaw('p.location_id = l.id')
-          .andWhere('p.processed', false);
+          .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); });
       })
       .orderBy('l.created_at', 'asc')
       .select('l.id', 'l.name', 'l.search_term')
@@ -358,7 +358,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 
     const photos = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); })
       .orderBy('p.created_at', 'desc')
       .limit(20)
       .select(
@@ -385,7 +385,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 
     const remainingRow = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); })
       .count({ c: '*' })
       .first();
     const remaining = Number(remainingRow?.c ?? 0);
