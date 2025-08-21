@@ -48,6 +48,14 @@ create index if not exists idx_catchments_created_at on catchments(created_at);
 -- Backfill column for image source on existing catchments
 ALTER TABLE catchments
   ADD COLUMN IF NOT EXISTS image_source text;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_top_n integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_per_page integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_max_pages integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_params jsonb DEFAULT '{}'::jsonb;
 
 -- ===================== 2. Locations ======================
 create table if not exists locations (

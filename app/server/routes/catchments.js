@@ -17,6 +17,25 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
     const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
+    // Optional Openverse config
+    const ovTopN = Number(req.body?.openverseTopN);
+    const ovPerPage = Number(req.body?.openversePerPage);
+    const ovMaxPages = Number(req.body?.openverseMaxPages);
+    let ovParams = {};
+    if (req.body?.openverseParams && typeof req.body.openverseParams === 'object') {
+      ovParams = req.body.openverseParams;
+    }
+
+    // Build DB payload/update objects
+    const base = { name, lat, lon, intro, image_source: imageSource };
+    const updateData = { image_source: imageSource };
+    if (imageSource === 'openverse') {
+      if (Number.isFinite(ovTopN) && ovTopN > 0) { base.openverse_top_n = ovTopN; updateData.openverse_top_n = ovTopN; }
+      if (Number.isFinite(ovPerPage) && ovPerPage > 0) { base.openverse_per_page = ovPerPage; updateData.openverse_per_page = ovPerPage; }
+      if (Number.isFinite(ovMaxPages) && ovMaxPages > 0) { base.openverse_max_pages = ovMaxPages; updateData.openverse_max_pages = ovMaxPages; }
+      if (ovParams && Object.keys(ovParams).length > 0) { base.openverse_params = ovParams; updateData.openverse_params = ovParams; }
+    }
+
     // Find-or-create to avoid 23505 on unique (lower(name), lat, lon)
     let id;
     try {
@@ -31,7 +50,7 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
         }
       } else {
         const insert = await db('catchments')
-          .insert({ name, lat, lon, intro })
+          .insert(base)
           .returning(['id']);
         id = insert?.[0]?.id;
         if (!id) throw new Error('Failed to create catchment');
@@ -43,6 +62,15 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       // Attach minimal context and bubble to error handler
       e.context = { route: 'POST /catchments', phase: 'db_find_or_create', name, lat, lon };
       throw e;
+    }
+
+    // Persist/merge config onto catchment (idempotent)
+    try {
+      await db('catchments').where({ id }).update(updateData);
+    } catch (e) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_update_failed', catchmentId: id, message: e?.message });
+      }
     }
 
     // Enqueue stage 1 explicitly (idempotent jobId)

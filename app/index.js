@@ -752,6 +752,27 @@ app.get('/', (_req, res) => {
           <option value="google" selected>Google</option>
           <option value="openverse">Openverse</option>
         </select>
+        <div id="ovCfg" style="display:none;margin:8px 0 0 0">
+          <div class="small muted" style="margin-bottom:6px">Openverse search options</div>
+          <div class="row" style="gap:8px">
+            <div style="flex:1">
+              <label>Top N</label>
+              <input id="ovTopN" placeholder="20"/>
+            </div>
+            <div style="flex:1">
+              <label>Per Page</label>
+              <input id="ovPerPage" placeholder="50"/>
+            </div>
+            <div style="flex:1">
+              <label>Max Pages</label>
+              <input id="ovMaxPages" placeholder="5"/>
+            </div>
+          </div>
+          <label>license_type (comma-separated)</label>
+          <input id="ovLicenseType" placeholder="commercial,modification"/>
+          <label>Extra params (JSON, optional)</label>
+          <textarea id="ovExtraParams" rows="2" placeholder='{"aspect_ratio":"wide"}'></textarea>
+        </div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button id="kick">Create Catchment</button>
           <button id="refresh" type="button">Refresh</button>
@@ -791,6 +812,13 @@ app.get('/', (_req, res) => {
     const tblBody = document.querySelector('#tbl tbody');
     const lastUpdated = $('#lastUpdated');
     const envHint = $('#envHint');
+    const imageSourceSel = document.getElementById('imageSource');
+    const ovCfg = document.getElementById('ovCfg');
+    const ovTopN = document.getElementById('ovTopN');
+    const ovPerPage = document.getElementById('ovPerPage');
+    const ovMaxPages = document.getElementById('ovMaxPages');
+    const ovLicenseType = document.getElementById('ovLicenseType');
+    const ovExtraParams = document.getElementById('ovExtraParams');
 
     async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
@@ -839,6 +867,13 @@ app.get('/', (_req, res) => {
       }catch(e){ msg.textContent = 'Load failed: ' + e.message; }
     }
 
+    // Toggle OV config visibility
+    function updateOvVisibility(){
+      ovCfg.style.display = (imageSourceSel.value === 'openverse') ? 'block' : 'none';
+    }
+    imageSourceSel.addEventListener('change', updateOvVisibility);
+    updateOvVisibility();
+
     // Realtime updates via SSE
     try {
       const es = new EventSource('/events');
@@ -868,13 +903,35 @@ app.get('/', (_req, res) => {
     $('#kick').addEventListener('click', async ()=>{
       msg.textContent = '';
       try{
+        const imgSrc = imageSourceSel.value;
         const body = {
           name: nameInput.value.trim(),
           lat: Number(latInput.value),
           lon: Number(lonInput.value),
-          intro: introInput.value.trim() || undefined,
-          imageSource: document.getElementById('imageSource').value
+          intro: (introInput.value || '').trim() || undefined,
+          imageSource: imgSrc
         };
+        if (imgSrc === 'openverse') {
+          // Optional Openverse tuning from UI
+          const nTop = Number(ovTopN.value);
+          const nPer = Number(ovPerPage.value);
+          const nMax = Number(ovMaxPages.value);
+          if (Number.isFinite(nTop) && nTop > 0) body.openverseTopN = nTop;
+          if (Number.isFinite(nPer) && nPer > 0) body.openversePerPage = nPer;
+          if (Number.isFinite(nMax) && nMax > 0) body.openverseMaxPages = nMax;
+
+          let params = {};
+          const lic = (ovLicenseType.value || '').trim();
+          if (lic) params.license_type = lic;
+          try {
+            const extra = (ovExtraParams.value || '').trim();
+            if (extra) {
+              const parsed = JSON.parse(extra);
+              if (parsed && typeof parsed === 'object') params = { ...params, ...parsed };
+            }
+          } catch (_) { /* ignore malformed JSON */ }
+          if (Object.keys(params).length > 0) body.openverseParams = params;
+        }
         const r = await fetch('/catchments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-api-key': apiKeyInput.value || '' },
@@ -1034,8 +1091,25 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       ? req.body.imageSource
       : 'google';
 
+    // Optional Openverse config from UI
+    const ovTopN = Number(req.body?.openverseTopN);
+    const ovPerPage = Number(req.body?.openversePerPage);
+    const ovMaxPages = Number(req.body?.openverseMaxPages);
+    let ovParams = {};
+    if (req.body?.openverseParams && typeof req.body.openverseParams === 'object') {
+      ovParams = req.body.openverseParams;
+    }
+
+    const payload = { name, lat, lon, intro, image_source };
+    if (image_source === 'openverse') {
+      if (Number.isFinite(ovTopN) && ovTopN > 0) payload.openverse_top_n = ovTopN;
+      if (Number.isFinite(ovPerPage) && ovPerPage > 0) payload.openverse_per_page = ovPerPage;
+      if (Number.isFinite(ovMaxPages) && ovMaxPages > 0) payload.openverse_max_pages = ovMaxPages;
+      if (ovParams && Object.keys(ovParams).length > 0) payload.openverse_params = ovParams;
+    }
+
     const insert = await db('catchments')
-      .insert({ name, lat, lon, intro, image_source })
+      .insert(payload)
       .returning(['id']);
     const id = insert?.[0]?.id;
     if (!id) throw new Error('Failed to create catchment');

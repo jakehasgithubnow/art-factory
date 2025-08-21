@@ -33,7 +33,16 @@ function to01(text) {
 
 export default async function photos(job) {
   const { locationId } = job.data;
-  const location = await db('locations').where({ id: locationId }).first();
+  const location = await db('locations as l')
+    .leftJoin('catchments as c', 'c.id', 'l.catchment_id')
+    .where('l.id', locationId)
+    .first([
+      'l.*',
+      db.raw('c.openverse_top_n as c_ov_top_n'),
+      db.raw('c.openverse_per_page as c_ov_per_page'),
+      db.raw('c.openverse_max_pages as c_ov_max_pages'),
+      db.raw('c.openverse_params as c_ov_params')
+    ]);
   if (!location || location.processed) return;
 
   const source = location.image_source || 'google';
@@ -41,7 +50,23 @@ export default async function photos(job) {
   let images = [];
   try {
     if (source === 'openverse') {
-      images = await openverseImageSearch(location.search_term, OPENVERSE_TOP_N);
+      // Determine per-catchment Openverse config (fallback to defaults)
+      let topN = OPENVERSE_TOP_N;
+      const nTop = Number(location?.c_ov_top_n);
+      if (Number.isFinite(nTop) && nTop > 0) topN = nTop;
+
+      const ovOptions = {};
+      const perPageN = Number(location?.c_ov_per_page);
+      if (Number.isFinite(perPageN) && perPageN > 0) ovOptions.perPage = perPageN;
+
+      const maxPagesN = Number(location?.c_ov_max_pages);
+      if (Number.isFinite(maxPagesN) && maxPagesN > 0) ovOptions.maxPages = maxPagesN;
+
+      if (location?.c_ov_params && typeof location.c_ov_params === 'object') {
+        ovOptions.openverseParams = location.c_ov_params;
+      }
+
+      images = await openverseImageSearch(location.search_term, topN, ovOptions);
     } else {
       images = await googleImageSearch(location.search_term, GOOGLE_TOP_N);
     }
