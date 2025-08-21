@@ -4,6 +4,7 @@ import { imageSearch as openverseImageSearch } from '../services/openverse.js';
 import { chat } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
+import { env } from '../config/env.js';
 
 const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
 const OPENVERSE_TOP_N = 20;
@@ -160,6 +161,23 @@ export default async function photos(job) {
       }
 
       if (!photoRow?.id) continue;
+
+      // If Openverse AI review is disabled, skip classification and queue for moderation
+      if (env.openverseAiReview === false) {
+        try {
+          await db('photos').where({ id: photoRow.id }).update({
+            kept: false,
+            processed: false,
+            score: null,
+          });
+          try {
+            console.log('photos: openverse AI review disabled; queued for moderation', { locationId, photoId: photoRow.id, srcUrl });
+          } catch (_) {}
+        } catch (err) {
+          console.error('photos: failed to mark openverse photo for moderation (AI review disabled)', { locationId, photoId: photoRow.id, err });
+        }
+        continue;
+      }
 
       // Build user payload: use thumbnail when available; fall back to srcUrl
       const thumbUrl = img?.thumbnail || img?.thumbnail_url || srcUrl;

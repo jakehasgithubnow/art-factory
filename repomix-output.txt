@@ -57,6 +57,7 @@ app/
       20250817_add_openverse_metadata.sql
       20250817_migrate_prompts_to_systemprompts.sql
       20250817_seed_catchment_prompts.sql
+      20250820_multi_style_artwork.sql
     client.js
     schema.sql
     stylePrompts.js
@@ -68,6 +69,8 @@ app/
     workers.js
   scripts/
     migrate.js
+    query-artwork-by-photo.js
+    run-sql.js
   server/
     helpers/
       validation.js
@@ -197,6 +200,9 @@ export const env = {
   shop: optional('SHOPIFY_SHOP'),
   shopToken: optional('SHOPIFY_ACCESS_TOKEN'),
   shopifyVersion: optional('SHOPIFY_API_VERSION', '2024-04'),
+  // Feature flags for Shopify publish orchestration
+  createViaN8n: bool('SHOPIFY_CREATE_VIA_N8N', true),
+  requireMetafieldsSuccess: bool('SHOPIFY_REQUIRE_METAFIELDS_SUCCESS', false),
 
   // Queues & workers (mirrors defaults in queues/workers)
   queuePrefix: optional('QUEUE_PREFIX', 'art-factory'),
@@ -276,6 +282,26 @@ INSERT INTO system_prompts (key, prompt) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 ================
+File: app/db/migrations/20250820_multi_style_artwork.sql
+================
+-- 2025-08-20: Multi-style artwork support and moderation columns
+
+-- Add columns needed by code paths (moderation + style association)
+ALTER TABLE artwork
+  ADD COLUMN IF NOT EXISTS style_prompt_id integer REFERENCES style_prompts(id),
+  ADD COLUMN IF NOT EXISTS style_name text,
+  ADD COLUMN IF NOT EXISTS approved_for_publish boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS moderated_at timestamptz;
+
+-- Drop old uniqueness on photo_id (handle both constraint and index names)
+ALTER TABLE artwork DROP CONSTRAINT IF EXISTS artwork_unique_per_photo;
+DROP INDEX IF EXISTS artwork_unique_per_photo;
+
+-- New uniqueness: one artwork per photo per style
+CREATE UNIQUE INDEX IF NOT EXISTS artwork_unique_per_photo_style
+  ON artwork(photo_id, style_prompt_id);
+
+================
 File: app/db/client.js
 ================
 import knexFn from 'knex';
@@ -339,6 +365,10 @@ create unique index if not exists catchments_shopify_unique
 
 create index if not exists idx_catchments_created_at on catchments(created_at);
 
+-- Backfill column for image source on existing catchments
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS image_source text;
+
 -- ===================== 2. Locations ======================
 create table if not exists locations (
   id           uuid primary key default gen_random_uuid(),
@@ -373,6 +403,21 @@ create unique index if not exists locations_unique_place_per_catchment
 
 -- Fast retrieval by creation time
 create index if not exists idx_locations_created_at on locations(created_at);
+
+-- Backfill Google Places enrichment and source columns for existing locations rows
+ALTER TABLE locations
+  ADD COLUMN IF NOT EXISTS image_source text,
+  ADD COLUMN IF NOT EXISTS g_place_id text,
+  ADD COLUMN IF NOT EXISTS g_name text,
+  ADD COLUMN IF NOT EXISTS g_formatted_address text,
+  ADD COLUMN IF NOT EXISTS g_phone text,
+  ADD COLUMN IF NOT EXISTS g_website text,
+  ADD COLUMN IF NOT EXISTS g_lat numeric,
+  ADD COLUMN IF NOT EXISTS g_lng numeric,
+  ADD COLUMN IF NOT EXISTS g_rating numeric,
+  ADD COLUMN IF NOT EXISTS g_user_ratings_total integer,
+  ADD COLUMN IF NOT EXISTS g_types text,
+  ADD COLUMN IF NOT EXISTS g_photo_refs jsonb DEFAULT '[]'::jsonb;
 
 -- ===================== 3. Photos =========================
 create table if not exists photos (
@@ -419,18 +464,22 @@ create index if not exists idx_photos_created_at on photos(created_at);
 create table if not exists artwork (
   id          uuid primary key default gen_random_uuid(),
   photo_id    uuid not null references photos(id) on delete cascade,
+  style_prompt_id integer references style_prompts(id),
+  style_name  text,
   image_url   text not null,
   description text,
   mockup_urls jsonb default '[]'::jsonb,
   shopify_id  text,
+  approved_for_publish boolean default false,
+  moderated_at timestamptz,
   published   boolean not null default false,
   created_at  timestamptz default now()
 );
 
 create index if not exists idx_artwork_photo on artwork(photo_id);
 
--- One artwork per source photo
-create unique index if not exists artwork_unique_per_photo on artwork(photo_id);
+-- One artwork per source photo per style
+create unique index if not exists artwork_unique_per_photo_style on artwork(photo_id, style_prompt_id);
 
 -- Avoid duplicate Shopify products when backfilling
 create unique index if not exists artwork_shopify_unique
@@ -876,6 +925,84 @@ try {
 } finally {
   await client.end();
 }
+
+================
+File: app/scripts/query-artwork-by-photo.js
+================
+// scripts/query-artwork-by-photo.js
+// Usage: node scripts/query-artwork-by-photo.js <photoId-uuid>
+import pg from 'pg';
+import { env } from '../config/env.js';
+
+async function main() {
+  const photoId = process.argv[2];
+  if (!photoId) {
+    console.error('Usage: node scripts/query-artwork-by-photo.js <photoId-uuid>');
+    process.exit(1);
+  }
+
+  const client = new pg.Client({ connectionString: env.databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `
+      select
+        id,
+        photo_id,
+        style_prompt_id,
+        style_name,
+        approved_for_publish,
+        moderated_at,
+        published,
+        created_at,
+        image_url
+      from artwork
+      where photo_id = $1
+      order by created_at desc
+      `,
+      [photoId]
+    );
+    console.log(JSON.stringify({ count: rows.length, rows }, null, 2));
+  } finally {
+    await client.end();
+  }
+}
+
+main().catch((err) => {
+  console.error('query-artwork-by-photo failed:', err);
+  process.exit(1);
+});
+
+================
+File: app/scripts/run-sql.js
+================
+// scripts/run-sql.js
+// Usage: node scripts/run-sql.js path/to/file.sql
+import fs from 'node:fs/promises';
+import pg from 'pg';
+import { env } from '../config/env.js';
+
+async function main() {
+  const file = process.argv[2];
+  if (!file) {
+    console.error('Usage: node scripts/run-sql.js path/to/file.sql');
+    process.exit(1);
+  }
+  const sql = await fs.readFile(new URL('../' + file, import.meta.url), 'utf8');
+  const client = new pg.Client({ connectionString: env.databaseUrl });
+  await client.connect();
+  try {
+    await client.query(sql);
+    console.log(`Applied SQL from ${file} ✅`);
+  } finally {
+    await client.end();
+  }
+}
+
+main().catch((err) => {
+  console.error('run-sql failed:', err);
+  process.exit(1);
+});
 
 ================
 File: app/server/helpers/validation.js
@@ -3811,6 +3938,148 @@ export async function createProduct({
   return created.id; // backward compatible
 }
 
+/**
+ * Create a product using a raw Shopify-compatible product object.
+ * Returns the full created product object (including id, admin_graphql_api_id, images).
+ *
+ * @param {Object} productBody - The object that would normally be under { product: ... }
+ * @returns {Promise<Object>} - The created product object from Shopify
+ */
+export async function createProductRaw(productBody) {
+  if (!productBody || typeof productBody !== 'object') {
+    throw new Error('createProductRaw: productBody is required');
+  }
+
+  const traceId = randomUUID();
+  log({ event: 'create_product_raw_start', traceId });
+
+  const body = JSON.stringify({ product: productBody });
+  const data = await fetchJson('/products.json', { method: 'POST', body });
+  const created = data?.product;
+  log({ event: 'create_product_raw_res', traceId, hasId: Boolean(created?.id) });
+  if (!created?.id) throw new Error('Shopify did not return product.id');
+  log({ event: 'create_product_raw_success', traceId, productId: created.id });
+
+  return created;
+}
+
+/**
+ * Set metafields via Admin GraphQL metafieldsSet mutation.
+ *
+ * @param {string} ownerId - The admin_graphql_api_id for the Product (or GID fallback)
+ * @param {Array<{namespace:string,key:string,type:string,value:string}>} metafields
+ * @returns {Promise<Object>} - GraphQL response metafieldsSet payload
+ * Throws when env.requireMetafieldsSuccess is true and userErrors are returned.
+ */
+export async function setMetafieldsGraphQL(ownerId, metafields) {
+  if (!ownerId) throw new Error('setMetafieldsGraphQL: ownerId is required');
+  const traceId = randomUUID();
+
+  const meta = Array.isArray(metafields)
+    ? metafields.filter(m => m && m.namespace && m.key && m.type)
+    : [];
+
+  if (!meta.length) {
+    log({ event: 'graphql_metafields_set_skipped', traceId, reason: 'no_valid_metafields' });
+    return { metafields: [], userErrors: [] };
+  }
+
+  const query = `
+    mutation setMeta($meta: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $meta) {
+        metafields { id key namespace value }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    meta: meta.map(m => ({
+      ownerId,
+      namespace: m.namespace,
+      key: m.key,
+      type: m.type,
+      value: String(m.value ?? ''),
+    })),
+  };
+
+  const body = JSON.stringify({ query, variables });
+  const res = await fetchJson('/graphql.json', { method: 'POST', body });
+
+  // Handle GraphQL top-level errors (HTTP 200 with errors array)
+  const topErrors = Array.isArray(res?.errors)
+    ? res.errors.map(e => ({
+        field: Array.isArray(e?.path) ? e.path.join('.') : undefined,
+        message: e?.message || 'GraphQL error'
+      }))
+    : [];
+
+  if (topErrors.length) {
+    log({ event: 'graphql_top_level_errors', traceId, errors: topErrors });
+    if (env.requireMetafieldsSuccess) {
+      const err = new Error(`Shopify GraphQL errors: ${JSON.stringify(topErrors)}`);
+      err.context = { ownerId, topErrors };
+      throw err;
+    }
+    // Return in a shape that callers treat as userErrors to trigger REST fallback
+    return { metafields: [], userErrors: topErrors };
+  }
+
+  // n8n referenced shape: { data: { metafieldsSet: { metafields, userErrors } } }
+  const out = res?.data?.metafieldsSet || res?.metafieldsSet || res;
+  const userErrors = Array.isArray(out?.userErrors) ? out.userErrors : [];
+
+  log({
+    event: 'graphql_metafields_set_res',
+    traceId,
+    errors: userErrors.map(e => ({ field: e.field, message: e.message })),
+  });
+
+  if (userErrors.length && env.requireMetafieldsSuccess) {
+    const errMsg = JSON.stringify(userErrors);
+    const err = new Error(`Shopify metafieldsSet returned userErrors: ${errMsg}`);
+    // Preserve context for upstream logs
+    err.context = { ownerId, userErrors };
+    throw err;
+  }
+
+  return out;
+}
+
+/**
+ * Fallback: Set product metafields via REST endpoint.
+ * @param {number|string} productId
+ * @param {Array<{namespace:string,key:string,type:string,value:string}>} metafields
+ */
+export async function setProductMetafieldsREST(productId, metafields) {
+  if (!productId) throw new Error('setProductMetafieldsREST: productId is required');
+  const traceId = randomUUID();
+
+  const meta = Array.isArray(metafields)
+    ? metafields.filter(m => m && m.namespace && m.key && m.type)
+    : [];
+
+  if (!meta.length) {
+    log({ event: 'rest_metafields_set_skipped', traceId, reason: 'no_valid_metafields' });
+    return;
+  }
+
+  for (const mf of meta) {
+    const body = JSON.stringify({
+      metafield: {
+        namespace: mf.namespace,
+        key: mf.key,
+        type: mf.type,
+        value: String(mf.value ?? ''),
+      },
+    });
+    log({ event: 'rest_metafield_attach', traceId, productId, namespace: mf.namespace, key: mf.key, type: mf.type });
+    await fetchJson(`/products/${productId}/metafields.json`, { method: 'POST', body });
+  }
+
+  log({ event: 'rest_metafields_set_done', traceId, productId });
+}
+
 ================
 File: app/workflows/artwork.js
 ================
@@ -4011,28 +4280,31 @@ export default async function artwork(job) {
         console.warn('[artwork] Could not mark artwork complete in tracker', e);
       }
 
-      // Save to DB
-      for (let i = 0; i < promptFinalUrls.length; i++) {
-        const url = promptFinalUrls[i];
-        const desc = (i === 0) ? description : '';
+      // Save to DB — one artwork row per photo per style (first image only)
+      if (mainPaintingUrl) {
         const inserted = await db('artwork')
-          .insert({ photo_id: photoId, image_url: url, description: desc })
-          .onConflict('photo_id').ignore() // prevent duplicate key crash
+          .insert({
+            photo_id: photoId,
+            style_prompt_id: stylePrompt.id,
+            style_name: stylePrompt.text,
+            image_url: mainPaintingUrl,
+            description: description
+          })
+          .onConflict(['photo_id', 'style_prompt_id']).ignore()
           .returning(['id']);
         const artId = inserted?.[0]?.id;
         if (!artId) {
-          console.warn(`[artwork] No artwork inserted for photoId ${photoId} (possibly duplicate). Skipping mockup/publish steps for this style.`);
+          console.warn(`[artwork] No artwork inserted for photoId ${photoId} and style ${stylePrompt.id} (possibly duplicate). Skipping mockup/publish steps for this style.`);
           // Avoid any undefined variables from lingering from earlier steps
           res = null;
-          continue;
-        }
-
-        if (i === 0) {
+        } else {
           // Always require moderation approval before mockup/publish
           try {
             await db('artwork').where({ id: artId }).update({ approved_for_publish: false });
           } catch {}
         }
+      } else {
+        console.warn('[artwork] No mainPaintingUrl to save for this style; skipping DB insert.');
       }
     }
 
@@ -4424,6 +4696,17 @@ export default async function locations(job) {
         console.warn('locations workflow: Google Places enrichment failed', { catchmentId, place: p?.name, err: e });
       }
 
+      // Normalize fields for DB types
+      // g_photo_refs column is jsonb; ensure we send valid JSON text, not a PG array literal
+      if (Array.isArray(enrichment.g_photo_refs)) {
+        try {
+          enrichment.g_photo_refs = JSON.stringify(enrichment.g_photo_refs);
+        } catch (_e) {
+          // On serialization failure, drop the field so DB default ('[]') applies
+          delete enrichment.g_photo_refs;
+        }
+      }
+
       const [loc] = await db('locations')
         .insert({ 
           ...p, 
@@ -4729,7 +5012,27 @@ File: app/workflows/publish.js
 ================
 import db from '../db/client.js';
 import * as n8n from '../services/n8n.js';
+import { env } from '../config/env.js';
+import { createProductRaw, setMetafieldsGraphQL, setProductMetafieldsREST } from '../services/shopify.js';
 const { sendProduct } = n8n;
+
+function parseFormattedAddress(addr) {
+  if (!addr || typeof addr !== 'string') return { country: '', state: '', city: '' };
+  const parts = addr.split(',').map(s => s.trim()).filter(Boolean);
+  const country = parts.at(-1) || '';
+  let state = '', city = '';
+  if (parts.length >= 2) {
+    const mid = parts.at(-2);
+    const m = mid.match(/\b([A-Z]{2})\b/); // US state code heuristic
+    if (m) {
+      state = m[1];
+      city = parts.at(-3) || '';
+    } else {
+      city = mid; // non‑US best-effort
+    }
+  }
+  return { country, state, city };
+}
 
 export default async function publish(job) {
   const { artworkId } = job.data;
@@ -4750,7 +5053,10 @@ export default async function publish(job) {
       location_category: 'l.category',
       formatted_address: 'l.address',
       latitude: 'l.g_lat',
-      longitude: 'l.g_lng'
+      longitude: 'l.g_lng',
+      g_place_id: 'l.g_place_id',
+      g_formatted_address: 'l.g_formatted_address',
+      image_source: 'l.image_source'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -4839,7 +5145,7 @@ export default async function publish(job) {
       namespace: 'location',
       key: 'geo',
       type: 'json',
-      value: JSON.stringify({ lat: row.catchment_lat, lon: row.catchment_lon }),
+      value: JSON.stringify({ lat: row.latitude, lon: row.longitude }),
     },
     {
       namespace: 'location',
@@ -4859,6 +5165,8 @@ export default async function publish(job) {
   const tags = [row.location_name, 'Bomberg', 'generated'].filter(Boolean);
 
   // Build payload in n8n expected format
+  const primaryImage = (Array.isArray(images) && images[0]?.src) ? images[0].src : (art.image_url || (Array.isArray(mockups) && mockups[0]) || row.image_source || '');
+  const { country, state, city } = parseFormattedAddress(row.g_formatted_address);
   const payload = {
     product: {
       title,
@@ -4886,32 +5194,103 @@ export default async function publish(job) {
       ]
     },
     location_title: row.location_name || '',
-    google_id: '', // not present in schema
-    country: '',   // not in schema
-    state: '',     // not in schema
-    city: '',      // not in schema
-    formatted_address: row.formatted_address || '',
+    google_id: row.g_place_id || '',
+    country: country || '',
+    state: state || '',
+    city: city || '',
+    formatted_address: row.g_formatted_address || row.formatted_address || '',
     latitude: row.latitude ?? '',
     longitude: row.longitude ?? '',
     location_category: row.location_category || '',
     location_description: row.location_description || '',
-    location_photo: row.image_source || '', // from schema
-    style_name: '',
+    location_photo: primaryImage || '',
+    style_name: 'Bomberg',
     uuid: String(artworkId),
     featured: art.featured || ''
   };
 
-  try {
-    await sendProduct(payload);
-  } catch (err) {
-    console.error('publish: sendProduct to n8n failed', { artworkId, err });
-    throw err;
-  }
+  if (env.createViaN8n) {
+    try {
+      await sendProduct(payload);
+    } catch (err) {
+      console.error('publish: sendProduct to n8n failed', { artworkId, err });
+      throw err;
+    }
+    // Mark as published/idempotent once webhook has been successfully sent
+    await db('artwork')
+      .where({ id: artworkId })
+      .update({ published: true });
+  } else {
+    // Internal Shopify path (in-app, replacing n8n)
+    let created;
+    try {
+      created = await createProductRaw(payload.product);
+    } catch (err) {
+      console.error('publish: createProductRaw failed', { artworkId, err });
+      throw err;
+    }
 
-  // Mark as published/idempotent once webhook has been successfully sent
-  await db('artwork')
-    .where({ id: artworkId })
-    .update({ published: true });
+    // Persist Shopify ID and mark as published after successful create
+    try {
+      await db('artwork')
+        .where({ id: artworkId })
+        .update({ shopify_id: String(created.id), published: true });
+    } catch (err) {
+      // Avoid throwing here to prevent duplicate product creation on retry.
+      console.error('publish: DB update failed after Shopify create', { artworkId, createdId: created?.id, err });
+    }
+
+    // Build metafields mirroring previous n8n flow
+    const ownerId = created.admin_graphql_api_id || `gid://shopify/Product/${created.id}`;
+
+    const details = {
+      title: payload.location_title,
+      google_id: payload.google_id || '',
+      country: payload.country || '',
+      state: payload.state || '',
+      city: payload.city || '',
+      formatted_address: payload.formatted_address || '',
+      category: payload.location_category || '',
+      description: payload.location_description || '',
+      location_photo: payload.location_photo || '',
+      style_name: payload.style_name || '',
+    };
+    const lat = Number.parseFloat(payload.latitude);
+    if (Number.isFinite(lat)) details.latitude = lat;
+    const lon = Number.parseFloat(payload.longitude);
+    if (Number.isFinite(lon)) details.longitude = lon;
+
+    const meta = [
+      { namespace: 'location', key: 'details', type: 'json', value: JSON.stringify(details) },
+    ];
+    const imgs = Array.isArray(created.images) ? created.images : [];
+    if (imgs[1]?.src) meta.push({ namespace: 'images', key: 'image2', type: 'single_line_text_field', value: String(imgs[1].src) });
+    if (imgs[2]?.src) meta.push({ namespace: 'images', key: 'image3', type: 'single_line_text_field', value: String(imgs[2].src) });
+    if (imgs[3]?.src) meta.push({ namespace: 'images', key: 'image4', type: 'single_line_text_field', value: String(imgs[3].src) });
+    if (payload.featured) meta.push({ namespace: 'notes', key: 'features', type: 'single_line_text_field', value: String(payload.featured) });
+
+    // Prefer REST for reliability (observed success in n8n); fall back to GraphQL if REST fails
+    try {
+      await setProductMetafieldsREST(created.id, meta);
+    } catch (restErr) {
+      console.warn('publish: REST metafields failed, attempting GraphQL fallback', { artworkId, productId: created?.id, restErr });
+      try {
+        const gqlRes = await setMetafieldsGraphQL(ownerId, meta);
+        const gqlErrors = Array.isArray(gqlRes?.userErrors) ? gqlRes.userErrors : [];
+        if (gqlErrors.length) {
+          console.error('publish: GraphQL metafieldsSet returned userErrors after REST failure', {
+            artworkId,
+            ownerId,
+            userErrors: gqlErrors
+          });
+          if (env.requireMetafieldsSuccess) throw new Error(`GraphQL userErrors: ${JSON.stringify(gqlErrors)}`);
+        }
+      } catch (gqlErr) {
+        console.error('publish: GraphQL metafields fallback failed', { artworkId, ownerId, gqlErr });
+        if (env.requireMetafieldsSuccess) throw gqlErr;
+      }
+    }
+  }
 }
 
 ================

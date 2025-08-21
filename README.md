@@ -79,6 +79,10 @@ In essence, the application automates the entire process from defining a geograp
 
     # Optional: custom port (defaults to 3000)
     PORT=3003
+
+    # Feature flags
+    # When false, Openverse photos are not sent to OpenAI review and all are queued for manual moderation
+    OPENVERSE_AI_REVIEW=true
     ```
 
 ### Resilience and Queue Backoff

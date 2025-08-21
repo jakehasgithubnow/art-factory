@@ -41,6 +41,9 @@ export const env = {
   openverseUserAgent: optional('OPENVERSE_USER_AGENT'),
   appContact: optional('APP_CONTACT'),
 
+  // Feature flags
+  openverseAiReview: bool('OPENVERSE_AI_REVIEW', true),
+
   // Cloudinary
   cloudName: optional('CLOUDINARY_CLOUD_NAME'),
   cloudKey: optional('CLOUDINARY_API_KEY'),
