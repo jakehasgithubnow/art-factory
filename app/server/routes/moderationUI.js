@@ -130,7 +130,7 @@ function cardHTML(p) {
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
-      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="small muted">score: \${(typeof p.score === 'number' && Number.isFinite(p.score)) ? p.score.toFixed(2) : ((p.score != null && p.score !== '') ? p.score : 0)}</div>
       <div class="badge pass">PASS</div>
     </div>
   </div>\`;
@@ -147,7 +147,13 @@ function render() {
     searchTermWrap.style.display = 'none';
     searchTermEl.textContent = '—';
   }
-  grid.innerHTML = current.photos.map(cardHTML).join('');
+  const html = Array.isArray(current.photos)
+    ? current.photos.map(p => {
+        try { return cardHTML(p); }
+        catch (e) { try { console.error('card_render_error', { id: p?.id, e }); } catch (_) {} return ''; }
+      }).join('')
+    : '';
+  grid.innerHTML = html;
   doneEl.style.display = 'none';
   // update counts (all pass by default)
   updateCounts();

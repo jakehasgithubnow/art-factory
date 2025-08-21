@@ -182,7 +182,7 @@ function cardHTML(p) {
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
-      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="small muted">score: \${(typeof p.score === 'number' && Number.isFinite(p.score)) ? p.score.toFixed(2) : ((p.score != null && p.score !== '') ? p.score : 0)}</div>
       <div class="badge pass">PASS</div>
     </div>
   </div>\`;
