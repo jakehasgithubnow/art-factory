@@ -5,6 +5,8 @@ import { chat } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
 import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+import { log } from '../server/utils/logger.js';
 
 const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
 const OPENVERSE_TOP_N = 20;
@@ -47,9 +49,19 @@ export default async function photos(job) {
 
   const source = location.image_source || 'google';
 
+  // Openverse run tracking for logging
+  let ovRunId = null;
+  let ovModerationEnabledCount = 0;
+  let ovKeptCount = 0;
+  let ovDeletedCount = 0;
+
   let images = [];
   try {
     if (source === 'openverse') {
+      ovRunId = randomUUID();
+      try {
+        log({ event: 'openverse_run_start', runId: ovRunId, locationId, search_term: location.search_term });
+      } catch (_) {}
       // Determine per-catchment Openverse config (fallback to defaults)
       let topN = OPENVERSE_TOP_N;
       const nTop = Number(location?.c_ov_top_n);
@@ -66,7 +78,26 @@ export default async function photos(job) {
         ovOptions.openverseParams = location.c_ov_params;
       }
 
+      try {
+        log({
+          event: 'openverse_run_config',
+          runId: ovRunId,
+          locationId,
+          top_n: topN,
+          options: ovOptions
+        });
+      } catch (_) {}
+
       images = await openverseImageSearch(location.search_term, topN, ovOptions);
+      try {
+        log({
+          event: 'openverse_run_results',
+          runId: ovRunId,
+          locationId,
+          requested_top_n: topN,
+          returned_count: Array.isArray(images) ? images.length : 0
+        });
+      } catch (_) {}
     } else {
       images = await googleImageSearch(location.search_term, GOOGLE_TOP_N);
     }
@@ -76,6 +107,20 @@ export default async function photos(job) {
   }
 
   if (!Array.isArray(images) || images.length === 0) {
+    if (source === 'openverse') {
+      try {
+        log({
+          event: 'openverse_run_summary',
+          runId: ovRunId,
+          locationId,
+          returned_count: 0,
+          moderation_enabled_count: 0,
+          kept_count: 0,
+          deleted_count: 0,
+          ai_review_disabled: env.openverseAiReview === false
+        });
+      } catch (_) {}
+    }
     await db('locations').where({ id: locationId }).update({ processed: true });
     return;
   }
@@ -201,6 +246,7 @@ export default async function photos(job) {
         } catch (err) {
           console.error('photos: failed to mark openverse photo for moderation (AI review disabled)', { locationId, photoId: photoRow.id, err });
         }
+        try { ovModerationEnabledCount += 1; } catch (_) {}
         continue;
       }
 
@@ -245,12 +291,15 @@ export default async function photos(job) {
               processed: false,
               score: 1,
             });
+            try { ovModerationEnabledCount += 1; } catch (_) {}
           }
           console.log('photos: kept openverse photo', { locationId, photoId: photoRow.id, srcUrl });
+          try { ovKeptCount += 1; } catch (_) {}
         } else {
           // Delete photo row entirely
           await db('photos').where({ id: photoRow.id }).del();
           console.log('photos: deleted openverse photo (classified 0)', { locationId, photoId: photoRow.id, srcUrl });
+          try { ovDeletedCount += 1; } catch (_) {}
         }
       } catch (err) {
         console.error('photos: openverse post-classification update failed', { locationId, photoId: photoRow.id, err });
@@ -316,5 +365,19 @@ export default async function photos(job) {
   }
 
   // Mark location processed after iterating all images
+  if (source === 'openverse') {
+    try {
+      log({
+        event: 'openverse_run_summary',
+        runId: ovRunId,
+        locationId,
+        returned_count: Array.isArray(images) ? images.length : 0,
+        moderation_enabled_count: ovModerationEnabledCount,
+        kept_count: ovKeptCount,
+        deleted_count: ovDeletedCount,
+        ai_review_disabled: env.openverseAiReview === false
+      });
+    } catch (_) {}
+  }
   await db('locations').where({ id: locationId }).update({ processed: true });
 }
