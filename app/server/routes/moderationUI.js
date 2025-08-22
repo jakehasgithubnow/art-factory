@@ -18,7 +18,12 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;padding-top:56px}
+  .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:12px;background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 14px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
+  .brand{font-weight:800;letter-spacing:.02em}
+  .nav{display:flex;gap:10px;align-items:center}
+  .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+  .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
   .wrap{max-width:1200px;margin:20px auto;padding:0 16px 88px}
   h1{font-size:18px;margin:12px 0}
   .muted{color:var(--muted)}
@@ -49,6 +54,15 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   a.link{color:#8ab4ff;text-decoration:none}
   .empty{padding:48px 16px;background:var(--panel);border:1px dashed var(--border);border-radius:12px;text-align:center}
 </style>
+<header class="topbar">
+  <div class="brand">Art Factory</div>
+  <nav class="nav">
+    <a href="/admin/style-prompts-ui">Style Prompts</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+  </nav>
+</header>
+
 <div class="wrap">
   <h1>Moderate Photos</h1>
   <div class="row">

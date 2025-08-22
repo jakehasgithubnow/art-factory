@@ -29,10 +29,47 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
     res.send(`
       <html>
         <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width,initial-scale=1" />
           <title>Prompts Configuration</title>
+          <style>
+            :root{
+              --bg:#0b0d11;--panel:#151922;--panel2:#11151c;--border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;
+              --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b
+            }
+            *{box-sizing:border-box}
+            html,body{height:100%}
+            body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;padding-top:56px}
+            .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:12px;background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 14px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
+            .brand{font-weight:800;letter-spacing:.02em}
+            .nav{display:flex;gap:10px;align-items:center}
+            .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+            .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
+            .wrap{max-width:1100px;margin:20px auto;padding:0 16px 40px}
+            h1{font-size:18px;margin:18px 0 10px}
+            h2{font-size:16px;margin:24px 0 10px;color:#cdd6e3}
+            form{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 12px 14px;margin:10px 0 18px}
+            label{font-weight:600;color:#cdd6e3}
+            textarea, input[type="text"]{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:var(--ink);padding:8px}
+            textarea:focus, input[type="text"]:focus{outline:2px solid rgba(106,164,255,.35);border-color:#35507c}
+            .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+            .muted{color:var(--muted)}
+            .btn{background:var(--btn);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}
+            .btn[disabled]{opacity:.6;cursor:not-allowed}
+            .group{border:1px dashed var(--border);border-radius:10px;padding:10px;margin:8px 0}
+          </style>
         </head>
         <body>
-          <h1>System Prompts</h1>
+          <header class="topbar">
+            <div class="brand">Art Factory</div>
+            <nav class="nav">
+              <a href="/admin/style-prompts-ui">Style Prompts</a>
+              <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+              <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+            </nav>
+          </header>
+          <div class="wrap">
+            <h1>System Prompts</h1>
           <form method="POST" action="/admin/system-prompts-ui/update">
             ${systemPrompts.map(p => `
               <div>
@@ -68,6 +105,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             </div>
             <button type="submit">Add Style Prompt</button>
           </form>
+          </div>
         </body>
       </html>
     `);

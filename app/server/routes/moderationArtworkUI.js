@@ -63,12 +63,20 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   .empty{
     position:fixed;inset:56px 0 0 0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:16px
   }
+  .nav{display:flex;gap:10px;align-items:center;margin-left:8px}
+  .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+  .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
 </style>
 
 <div class="topbar">
   <div class="title">Moderate Artwork</div>
   <div class="pill">Catchment: ${catchmentId}</div>
   <div id="location" class="pill">—</div>
+  <nav class="nav">
+    <a href="/admin/style-prompts-ui">Style Prompts</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+  </nav>
   <div class="grow"></div>
   <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)" style="min-width:260px"/>
 </div>
