@@ -1,6 +1,6 @@
 import db from '../db/client.js';
 import fetch from 'node-fetch';
-import { chat, generateImage } from '../services/openai.js';
+import { chat, chatJson, generateImage } from '../services/openai.js';
 import { createMockups } from '../services/framemock.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
@@ -194,15 +194,14 @@ export default async function artwork(job) {
       // Fallback
       if (promptFinalUrls.length === 0) promptFinalUrls = promptPaintingUrls;
 
-      // Description
+      // Description (now JSON: {title, description})
       const mainPaintingUrl = promptFinalUrls[0];
       let description = '';
       if (mainPaintingUrl) {
-        // Load system prompt for artwork description from DB
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
         const userPromptRow = await getByKey('artwork_description_user');
-        const defaultUser = 'Describe the colours, medium and vibe of the painting at {url}';
+        const defaultUser = 'Describe the colours, medium and vibe of the painting.';
         const ctx = { imageUrl: String(mainPaintingUrl), ...locMeta };
         const sysPrompt = applyTemplate(sysPromptRow?.text, ctx);
         const userPromptTemplate = applyTemplate(userPromptRow?.text || defaultUser, ctx);
@@ -210,14 +209,40 @@ export default async function artwork(job) {
         const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 
         try {
-          description = await chat(
-            sysPrompt,
-            { text: instruction, imageUrls: [String(mainPaintingUrl)] },
-            0.7,
+          const details = await chatJson({
+            system: `${sysPrompt}\n\nReturn ONLY minified JSON strictly matching the schema.`,
+            user: { text: `Generate an evocative, concise artwork title and ~35-word description for this painting. ${instruction}`, imageUrls: [String(mainPaintingUrl)] },
+            schema: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                description: { type: 'string' }
+              },
+              required: ['title', 'description'],
+              additionalProperties: false
+            },
+            temperature: 0.7,
             model
-          );
+          });
+          if (details && typeof details.title === 'string' && typeof details.description === 'string') {
+            description = JSON.stringify({ title: details.title, description: details.description });
+          } else {
+            throw new Error('chatJson did not return expected fields');
+          }
         } catch (e) {
-          console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
+          console.warn('[artwork] Failed to generate JSON details; falling back to text description', e);
+          try {
+            const textDesc = await chat(
+              sysPrompt,
+              { text: instruction, imageUrls: [String(mainPaintingUrl)] },
+              0.7,
+              model
+            );
+            // Fallback: store as plain text; publish.js will handle legacy format
+            description = textDesc;
+          } catch (e2) {
+            console.warn('[artwork] Fallback description failed', e2);
+          }
         }
       } else {
         console.warn('[artwork] No mainPaintingUrl found, skipping description generation.');

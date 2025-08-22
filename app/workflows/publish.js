@@ -2,6 +2,7 @@ import db from '../db/client.js';
 import * as n8n from '../services/n8n.js';
 import { env } from '../config/env.js';
 import { createProductRaw, setMetafieldsGraphQL, setProductMetafieldsREST } from '../services/shopify.js';
+import { chatJson } from '../services/openai.js';
 const { sendProduct } = n8n;
 
 function parseFormattedAddress(addr) {
@@ -59,17 +60,81 @@ export default async function publish(job) {
   }
   function tryParseArtworkDetails(s) {
     if (!s || typeof s !== 'string') return null;
+    // First, try strict JSON
     try {
       const o = JSON.parse(s);
-      return (o && typeof o.title === 'string' && typeof o.description === 'string') ? o : null;
-    } catch {
+      return (o && typeof o.title === 'string') ? o : null;
+    } catch {}
+    // Loose parse: extract the first balanced JSON object and parse that
+    function extractBalancedObject(text) {
+      const start = text.indexOf('{');
+      if (start === -1) return null;
+      let depth = 0;
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) return text.slice(start, i + 1);
+        }
+      }
       return null;
     }
+    const snippet = extractBalancedObject(s);
+    if (snippet) {
+      try {
+        const o = JSON.parse(snippet);
+        return (o && typeof o.title === 'string') ? o : null;
+      } catch {}
+    }
+    return null;
+  }
+  function extractTitleLoose(s) {
+    if (!s || typeof s !== 'string') return null;
+    const m = s.match(/"title"\s*:\s*"([^"]{1,256})"/i);
+    if (m && m[1]) return m[1].trim();
+    const m2 = s.match(/^\s*title\s*[:\-]\s*(.+)$/im);
+    if (m2 && m2[1]) return m2[1].trim().replace(/^["'`]|["'`]$/g, '');
+    return null;
   }
   const artDetails = tryParseArtworkDetails(art.description);
   const ctx = { locationName: row.location_name || '' };
-  const title = artDetails ? (artDetails.title || `${row.location_name} – Bomberg Series`) : `${row.location_name} – Bomberg Series`;
-  const bodyHtml = artDetails ? (applyTemplate(artDetails.description, ctx) || '') : (art.description ?? '');
+  let title = (artDetails && typeof artDetails.title === 'string' && artDetails.title.trim())
+    ? artDetails.title.trim()
+    : (extractTitleLoose(art.description || '') || `${row.location_name} – Bomberg Series`);
+  const bodyHtml = (artDetails && typeof artDetails.description === 'string')
+    ? (applyTemplate(artDetails.description, ctx) || '')
+    : (art.description ?? '');
+  // Fallback: if we still only have the legacy fallback title, try generating JSON on-the-fly
+  if (!artDetails || !artDetails.title || title === `${row.location_name} – Bomberg Series`) {
+    try {
+      const ai = await chatJson({
+        system: 'Return ONLY minified JSON strictly matching the schema.',
+        user: { text: 'Generate a concise, evocative artwork title and a ~35-word description for this painting image. Return JSON with keys: title (string), description (string).', imageUrls: [String(art.image_url || '')] },
+        schema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            description: { type: 'string' }
+          },
+          required: ['title', 'description'],
+          additionalProperties: false
+        },
+        temperature: 0.7
+      });
+      if (ai && typeof ai.title === 'string') {
+        title = ai.title.trim() || title;
+        const descText = typeof ai.description === 'string' ? ai.description : bodyHtml;
+        bodyHtml = descText;
+        // Persist back to DB so future runs use the JSON
+        try {
+          await db('artwork').where({ id: artworkId }).update({ description: JSON.stringify({ title: title, description: descText }) });
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('publish: chatJson fallback failed', e);
+    }
+  }
 
   // Attempt mockup generation if none exist
   let mockups = [];
