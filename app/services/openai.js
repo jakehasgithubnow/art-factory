@@ -189,7 +189,7 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
   const endpoint =
     process.env.PAINT_ENDPOINT ||
     env.paintEndpoint ||
-    "https://api-direct.piapi.ai/v1/chat/completions";
+    "https://api.piapi.ai/v1/chat/completions";
 
   // Retry/circuit config (override via env)
   const retries = Number(process.env.PIAPI_RETRIES ?? 2);

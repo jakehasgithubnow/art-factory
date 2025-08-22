@@ -25,11 +25,12 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
     ]);
 
     // Allowed OpenAI chat models for selection
-    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
-    const renderModelSelect = (name, selected) => `
+    const allowedModelsSystem = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
+    const allowedModelsStyle = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const renderModelSelect = (name, selected, isSystem = false) => `
       <label>Model
         <select name="${name}">
-          ${allowedModels.map(m => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`).join('')}
+          ${(isSystem ? allowedModelsSystem : allowedModelsStyle).map(m => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`).join('')}
         </select>
       </label>
     `;
@@ -85,7 +86,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               <div>
                 <label for="${p.key}">${p.key}</label><br/>
                 <textarea name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea><br/>
-                ${renderModelSelect(`model_${p.key}`, p.model)}<br/>
+                ${renderModelSelect(`model_${p.key}`, p.model, true)}<br/>
               </div>
             `).join('')}
             <button type="submit">Save System Prompts</button>
@@ -134,8 +135,8 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
     const currentList = await getSystemPrompts();
     const enabledByKey = Object.fromEntries(currentList.map(p => [p.key, !!p.enabled]));
 
-    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
-    const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
+    const allowedModelsSystem = ['gpt-4o-mini','gpt-4o','gpt-4.1-mini','gpt-4.1','gpt-5','gpt-5-mini','gpt-5-nano'];
+    const normModel = (m) => (allowedModelsSystem.includes(String(m || '')) ? String(m) : null);
 
     console.log('SystemPrompt Update body:', req.body);
 
