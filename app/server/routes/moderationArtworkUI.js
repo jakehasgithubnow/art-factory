@@ -217,23 +217,49 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   async function act(action){
     const a = items[idx];
     if (!a) return;
-    // Optimistic advance before network
+
+    // Capture state before optimistic advance
     const curId = a.id;
+    const prevIdx = idx;
+
+    console.log('[ModerationUI] act start', { action, artworkId: curId, idx: prevIdx, hasApiKey: !!apiKeyInput.value.trim() });
+
+    // Optimistic advance before network
     advance();
 
-    const headers = { 'Content-Type':'application/json' };
+    const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     const key = apiKeyInput.value.trim();
     if (key) headers['x-api-key'] = key;
 
     try {
-      await fetch('/moderate/artwork/' + curId, {
-        method:'POST',
+      const r = await fetch('/moderate/artwork/' + curId, {
+        method: 'POST',
         headers,
         body: JSON.stringify({ action })
       });
+
+      if (!r.ok) {
+        const text = await r.text().catch(() => r.statusText);
+        console.warn('[ModerationUI] act failed', { action, artworkId: curId, status: r.status, statusText: r.statusText, body: text });
+        showToast((action === 'approve' ? 'Pass' : 'Fail') + ' failed: ' + r.status + ' ' + (text || ''));
+        // Revert optimistic advance
+        idx = prevIdx;
+        render();
+        return;
+      }
+
+      console.log('[ModerationUI] act success', { action, artworkId: curId, status: r.status });
+      if (action === 'reject') {
+        showToast('Artwork deleted');
+      } else if (action === 'approve') {
+        showToast('Artwork approved');
+      }
     } catch (e) {
-      // Non-blocking error
-      showToast('Failed to ' + (action==='approve'?'pass':'fail') + ' id ' + curId + ': ' + (e.message || 'error'));
+      console.error('[ModerationUI] act network error', { action, artworkId: curId, error: e && (e.message || e) });
+      showToast('Failed to ' + (action === 'approve' ? 'pass' : 'fail') + ' id ' + curId + ': ' + (e.message || 'error'));
+      // Revert optimistic advance on network error
+      idx = prevIdx;
+      render();
     }
   }
 
