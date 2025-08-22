@@ -76,8 +76,8 @@ if (!blurb) {
 try {
   const ownerId = `gid://shopify/Collection/${shopifyId}`;
   const meta = [
-    { namespace: 'location', key: 'latitude', type: 'number_decimal', value: String(latForMeta) },
-    { namespace: 'location', key: 'longitude', type: 'number_decimal', value: String(lonForMeta) },
+    { namespace: 'location', key: 'latitude', type: 'single_line_text_field', value: String(latForMeta) },
+    { namespace: 'location', key: 'longitude', type: 'single_line_text_field', value: String(lonForMeta) },
     { namespace: 'location', key: 'city_name', type: 'single_line_text_field', value: row.name }
   ];
   await setMetafieldsGraphQL(ownerId, meta);
