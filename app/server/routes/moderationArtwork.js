@@ -17,7 +17,7 @@ router.get('/admin/artworks', async (req, res, next) => {
       .join('locations as l', 'l.id', 'p.location_id')
       .select(
         'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
-        'p.id as photo_id','l.name as location_name'
+        'p.id as photo_id','l.name as location_name','p.thumbnail_url as photo_thumbnail_url','p.detail_url as photo_detail_url'
       )
       .where('l.catchment_id', catchmentId)
       .modify(qb => {
