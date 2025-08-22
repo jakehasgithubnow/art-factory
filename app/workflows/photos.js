@@ -40,6 +40,7 @@ export default async function photos(job) {
     .where('l.id', locationId)
     .first([
       'l.*',
+      db.raw('c.name as c_name'),
       db.raw('c.openverse_top_n as c_ov_top_n'),
       db.raw('c.openverse_per_page as c_ov_per_page'),
       db.raw('c.openverse_max_pages as c_ov_max_pages'),
@@ -261,7 +262,10 @@ export default async function photos(job) {
         }));
       } catch (_) {}
       const userText = typeof userTemplate === 'string'
-        ? userTemplate.replace('{{imageUrl}}', thumbUrl)
+        ? userTemplate
+            .replace('{{imageUrl}}', thumbUrl)
+            .replace('{{locationName}}', location.name || '')
+            .replace('{{catchmentName}}', location.c_name || '')
         : '';
 
       // Classify with gpt-4.1-mini: expect '0' or '1'
@@ -309,7 +313,10 @@ export default async function photos(job) {
       let score = 0;
       try {
         const userPrompt = typeof userTemplate === 'string'
-          ? userTemplate.replace('{{imageUrl}}', srcUrl)
+          ? userTemplate
+              .replace('{{imageUrl}}', srcUrl)
+              .replace('{{locationName}}', location.name || '')
+              .replace('{{catchmentName}}', location.c_name || '')
           : '';
         const scoreTxt = await chat(
           sysPrompt,
