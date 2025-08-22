@@ -24,6 +24,16 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
       getSystemPrompts()
     ]);
 
+    // Allowed OpenAI chat models for selection
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const renderModelSelect = (name, selected) => `
+      <label>Model
+        <select name="${name}">
+          ${allowedModels.map(m => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
+      </label>
+    `;
+
     res.set('Cache-Control', 'no-store');
 
     res.send(`
@@ -75,6 +85,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               <div>
                 <label for="${p.key}">${p.key}</label><br/>
                 <textarea name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea><br/>
+                ${renderModelSelect(`model_${p.key}`, p.model)}<br/>
               </div>
             `).join('')}
             <button type="submit">Save System Prompts</button>
@@ -86,6 +97,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               <div>
                 <label for="style-${p.id}">Prompt #${p.id}</label><br/>
                 <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
+                ${renderModelSelect(`model_${p.id}`, p.model)}<br/>
                 <label>
                   <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
                 </label>
@@ -99,6 +111,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             <div>
               <label for="new-style-text">New Prompt Text</label><br/>
               <textarea id="new-style-text" name="text" rows="2" cols="80"></textarea><br/>
+              ${renderModelSelect('model', null)}<br/>
               <label>
                 <input type="checkbox" name="enabled" checked/> Enabled
               </label>
@@ -121,12 +134,19 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
     const currentList = await getSystemPrompts();
     const enabledByKey = Object.fromEntries(currentList.map(p => [p.key, !!p.enabled]));
 
-    const updates = Object.entries(req.body);
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
+
     console.log('SystemPrompt Update body:', req.body);
-    for (const [key, text] of updates) {
+
+    for (const p of currentList) {
+      const key = p.key;
+      const text = req.body[key] ?? '';
+      const model = normModel(req.body[`model_${key}`]);
       const enabled = enabledByKey.hasOwnProperty(key) ? enabledByKey[key] : true;
-      await updateSystemPrompt(key, text || "", enabled);
+      await updateSystemPrompt(key, text || "", enabled, model);
     }
+
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
     next(err);
@@ -137,13 +157,21 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
 // Handle updates for style prompts
 router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
+
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
         const id = key.split('_')[1];
         const text = req.body[`text_${id}`];
         const enabled = req.body[`enabled_${id}`] !== undefined;
-        if (text) {
-          await updateStylePrompt(id, text);
+        const model = normModel(req.body[`model_${id}`]);
+
+        if (text !== undefined) {
+          await updateStylePrompt(id, text, model);
+        } else if (model !== null) {
+          // If only model changed and no text field present, still persist model change
+          await updateStylePrompt(id, undefined, model);
         }
         await toggleStylePrompt(id, enabled);
       }
@@ -161,8 +189,12 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
   try {
     const text = req.body?.text;
     const enabled = req.body?.enabled !== undefined;
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const modelInput = req.body?.model;
+    const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
+
     if (typeof text === 'string' && text.trim().length > 0) {
-      await createStylePrompt(text.trim(), enabled);
+      await createStylePrompt(text.trim(), enabled, model);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {

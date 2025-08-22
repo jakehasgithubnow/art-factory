@@ -177,11 +177,14 @@ export default async function artwork(job) {
         const userPromptRow = await getByKey('artwork_description_user');
         const userPromptTemplate = userPromptRow?.text || 'Describe the colours, medium and vibe of the painting at {url}';
         const instruction = userPromptTemplate.replace('at {url}', '').replace('{url}', '').trim();
+        const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 
         try {
           description = await chat(
             sysPrompt,
-            { text: instruction, imageUrls: [String(mainPaintingUrl)] }
+            { text: instruction, imageUrls: [String(mainPaintingUrl)] },
+            0.7,
+            model
           );
         } catch (e) {
           console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);

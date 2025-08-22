@@ -133,12 +133,16 @@ export default async function photos(job) {
     // Load prompts once per image (kept here for simplicity)
     let sysPrompt = '';
     let userTemplate = '';
+    let modelForScoring = 'gpt-4o-mini';
+    let modelForBinary = 'gpt-4.1-mini';
     try {
       const { getByKey } = await import('../db/systemPrompts.js');
       const sysPromptRow = await getByKey('photo_scoring_system');
       sysPrompt = sysPromptRow?.text || '';
       const userPromptRow = await getByKey('photo_scoring_user');
       userTemplate = userPromptRow?.text || '';
+      modelForScoring = sysPromptRow?.model || userPromptRow?.model || modelForScoring;
+      modelForBinary = sysPromptRow?.model || userPromptRow?.model || modelForBinary;
     } catch (err) {
       console.warn('photos: failed to load system/user prompts; defaulting', { locationId, err });
       sysPrompt = '';
@@ -278,7 +282,7 @@ export default async function photos(job) {
           sysForBinary,
           { imageUrls: [thumbUrl], text: userText },
           0,
-          'gpt-4.1-mini'
+          modelForBinary
         );
         keep = to01(result);
       } catch (err) {
@@ -321,7 +325,8 @@ export default async function photos(job) {
         const scoreTxt = await chat(
           sysPrompt,
           userPrompt,
-          0
+          0,
+          modelForScoring
         );
         score = clamp01(Number(scoreTxt));
       } catch (err) {

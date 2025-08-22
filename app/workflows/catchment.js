@@ -5,15 +5,18 @@ import { qLocation } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
-import { getSystemPrompt } from '../db/systemPrompts.js';
+import { getByKey as getSystemPromptRow } from '../db/systemPrompts.js';
 
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
   if (!row || row.processed) return;
 
-  const sysPrompt = await getSystemPrompt('catchment_intro_system');
-  const userPromptTemplate = await getSystemPrompt('catchment_intro_user');
+  const sysRow = await getSystemPromptRow('catchment_intro_system');
+  const userRow = await getSystemPromptRow('catchment_intro_user');
+  const sysPrompt = sysRow?.text;
+  const userPromptTemplate = userRow?.text;
+  const model = sysRow?.model || userRow?.model || 'gpt-4o-mini';
   const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
 
   const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
@@ -38,7 +41,8 @@ if (!blurb) {
         required: ['blurb', 'latitude', 'longitude'],
         additionalProperties: false
       },
-      temperature: 0
+      temperature: 0,
+      model
     });
 
     blurb = typeof json?.blurb === 'string' ? json.blurb.trim() : blurb;
@@ -51,7 +55,7 @@ if (!blurb) {
     if (!blurb) throw new Error('missing blurb');
   } catch (e) {
     // Fallback to plain text chat if JSON parsing fails
-    blurb = await chat(safeSystem, safeUser);
+    blurb = await chat(safeSystem, safeUser, 0.7, model);
   }
 }
 

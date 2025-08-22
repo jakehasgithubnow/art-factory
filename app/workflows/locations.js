@@ -60,9 +60,11 @@ export default async function locations(job) {
     ?.replace('{{lon}}', catchment.lon)
     ?.replace('{{catchmentName}}', catchment.name);
 
+  const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
+
   let places = [];
   try {
-    const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0 });
+    const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0, model });
     if (!raw || !Array.isArray(raw.places)) {
       console.error('locations workflow: invalid response format', { catchmentId, raw });
       return;

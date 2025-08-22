@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS system_prompts (
   id SERIAL PRIMARY KEY,
   key TEXT UNIQUE NOT NULL,
   text TEXT NOT NULL,
+  model TEXT,
   enabled BOOLEAN DEFAULT TRUE,
   updated_at TIMESTAMP DEFAULT now()
 );
@@ -192,6 +193,7 @@ drop function if exists notify_event() cascade;
 create table if not exists style_prompts (
   id serial primary key,
   text text not null,
+  model text,
   enabled boolean not null default true,
   updated_at timestamptz default now(),
   created_at timestamptz default now()

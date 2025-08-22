@@ -13,7 +13,6 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
-    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   try {
@@ -85,7 +84,6 @@ export async function chatJson({
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
-    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   // Helper: tolerant JSON parse (tries to extract a balanced object/array if extra text slips in)

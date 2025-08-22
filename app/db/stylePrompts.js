@@ -8,17 +8,30 @@ export async function getAll() {
   return db('style_prompts').orderBy('id', 'asc');
 }
 
-export async function createPrompt(text, enabled = true) {
+export async function createPrompt(text, enabled = true, model = null) {
+  const insertData = { text, enabled };
+  if (model != null && typeof model === 'string' && model.trim()) {
+    insertData.model = model.trim();
+  }
   const [prompt] = await db('style_prompts')
-    .insert({ text, enabled })
+    .insert(insertData)
     .returning('*');
   return prompt;
 }
 
-export async function updatePrompt(id, text) {
+export async function updatePrompt(id, text, model) {
+  const patch = { updated_at: db.fn.now() };
+  if (typeof text === 'string') patch.text = text;
+  if (model !== undefined) {
+    if (model == null || model === '') {
+      patch.model = null;
+    } else if (typeof model === 'string') {
+      patch.model = model.trim();
+    }
+  }
   const [prompt] = await db('style_prompts')
     .where({ id })
-    .update({ text, updated_at: db.fn.now() })
+    .update(patch)
     .returning('*');
   return prompt;
 }

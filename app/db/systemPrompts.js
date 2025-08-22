@@ -13,16 +13,27 @@ export async function getByKey(key) {
   return db('system_prompts').where({ key }).first();
 }
 
-export async function updatePrompt(key, text, enabled = true) {
+export async function updatePrompt(key, text, enabled = true, model) {
+  const patch = { updated_at: db.fn.now() };
+  if (typeof text === 'string') patch.text = text;
+  if (typeof enabled === 'boolean') patch.enabled = enabled;
+  if (model !== undefined) {
+    if (model == null || model === '') {
+      patch.model = null;
+    } else if (typeof model === 'string') {
+      patch.model = model.trim();
+    }
+  }
+
   const existing = await db('system_prompts').where({ key }).first();
   if (existing) {
     await db('system_prompts')
       .where({ key })
-      .update({ text, enabled, updated_at: db.fn.now() });
+      .update(patch);
     return db('system_prompts').where({ key }).first();
   } else {
     await db('system_prompts')
-      .insert({ key, text, enabled, updated_at: db.fn.now() });
+      .insert({ key, ...patch });
     return db('system_prompts').where({ key }).first();
   }
 }
