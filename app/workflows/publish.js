@@ -53,8 +53,23 @@ export default async function publish(job) {
     throw new Error(`Unable to resolve location/catchment for photo ${art.photo_id}`);
   }
 
-  const title = `${row.location_name} – Bomberg Series`;
-  const bodyHtml = `${art.description ?? ''}<br><br><em>${row.location_description ?? ''}</em>`;
+  function applyTemplate(str, ctx) {
+    if (typeof str !== 'string') return str;
+    return str.replace(/{{\s*(\w+)\s*}}/g, (_m, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+  }
+  function tryParseArtworkDetails(s) {
+    if (!s || typeof s !== 'string') return null;
+    try {
+      const o = JSON.parse(s);
+      return (o && typeof o.title === 'string' && typeof o.description === 'string') ? o : null;
+    } catch {
+      return null;
+    }
+  }
+  const artDetails = tryParseArtworkDetails(art.description);
+  const ctx = { locationName: row.location_name || '' };
+  const title = artDetails ? (applyTemplate(artDetails.title, ctx) || `${row.location_name} – Bomberg Series`) : `${row.location_name} – Bomberg Series`;
+  const bodyHtml = artDetails ? (applyTemplate(artDetails.description, ctx) || '') : (art.description ?? '');
 
   // Attempt mockup generation if none exist
   let mockups = [];
