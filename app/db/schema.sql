@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS system_prompts (
 INSERT INTO system_prompts (key, text) VALUES
   ('location_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.'),
   ('artwork_description_system', 'Describe a painting in 35 words.'),
-  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.')
+  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.'),
+  ('artwork_description_user', 'Describe the colours, medium and vibe of the painting at {url}')
 ON CONFLICT(key) DO NOTHING;
 
 -- Guardrails for geo ranges (no-op if already present)

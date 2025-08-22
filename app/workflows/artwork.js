@@ -174,11 +174,14 @@ export default async function artwork(job) {
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
         const sysPrompt = sysPromptRow?.text;
+        const userPromptRow = await getByKey('artwork_description_user');
+        const userPromptTemplate = userPromptRow?.text || 'Describe the colours, medium and vibe of the painting at {url}';
+        const userPrompt = userPromptTemplate.replace('{url}', String(mainPaintingUrl));
 
         try {
           description = await chat(
             sysPrompt,
-            `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+            userPrompt
           );
         } catch (e) {
           console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
@@ -372,9 +375,12 @@ export default async function artwork(job) {
     const { getByKey: getSysPrompt } = await import('../db/systemPrompts.js');
     const sysPromptRow2 = await getSysPrompt('artwork_description_system');
     const sysPrompt2 = sysPromptRow2?.text;
+    const userPromptRow2 = await getSysPrompt('artwork_description_user');
+    const userPromptTemplate2 = userPromptRow2?.text || 'Describe the colours, medium and vibe of the painting at {url}';
+    const userPrompt2 = userPromptTemplate2.replace('{url}', String(mainPaintingUrl));
     const description = await chat(
       sysPrompt2,
-      `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+      userPrompt2
     );
 
     // Mark artwork as completed in tracker
