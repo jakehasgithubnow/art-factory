@@ -8,6 +8,11 @@ import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
 import { log } from '../server/utils/logger.js';
 
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
 const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
 const OPENVERSE_TOP_N = 20;
 const GOOGLE_TOP_N = 10;
@@ -130,17 +135,15 @@ export default async function photos(job) {
     const srcUrl = img?.url || img?.src || '';
     if (!srcUrl) continue;
 
-    // Load prompts once per image (kept here for simplicity)
-    let sysPrompt = '';
-    let userTemplate = '';
+    // Load prompt rows once per image (kept here for simplicity)
+    let sysPromptRow = null;
+    let userPromptRow = null;
     let modelForScoring = 'gpt-4o-mini';
     let modelForBinary = 'gpt-4.1-mini';
     try {
       const { getByKey } = await import('../db/systemPrompts.js');
-      const sysPromptRow = await getByKey('photo_scoring_system');
-      sysPrompt = sysPromptRow?.text || '';
-      const userPromptRow = await getByKey('photo_scoring_user');
-      userTemplate = userPromptRow?.text || '';
+      sysPromptRow = await getByKey('photo_scoring_system');
+      userPromptRow = await getByKey('photo_scoring_user');
       modelForScoring = sysPromptRow?.model || userPromptRow?.model || modelForScoring;
       modelForBinary = sysPromptRow?.model || userPromptRow?.model || modelForBinary;
     } catch (err) {
@@ -265,18 +268,17 @@ export default async function photos(job) {
           used: img?.thumbnail ? 'thumbnail' : (img?.thumbnail_url ? 'thumbnail_url' : 'src_url')
         }));
       } catch (_) {}
-      const userText = typeof userTemplate === 'string'
-        ? userTemplate
-            .replace('{{imageUrl}}', thumbUrl)
-            .replace('{{locationName}}', location.name || '')
-            .replace('{{catchmentName}}', location.c_name || '')
-        : '';
+      const ctx = { imageUrl: thumbUrl, locationName: location.name || '', catchmentName: location.c_name || '' };
+      const sysTmpl = sysPromptRow?.text || '';
+      const userTmpl = userPromptRow?.text || '';
+      const systemForThis = applyTemplate(sysTmpl, ctx);
+      const userText = applyTemplate(userTmpl, ctx);
 
       // Classify with gpt-4.1-mini: expect '0' or '1'
       let keep = 0;
       try {
-        const sysForBinary = (typeof sysPrompt === 'string' && sysPrompt.trim())
-          ? `${sysPrompt}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
+        const sysForBinary = (typeof systemForThis === 'string' && systemForThis.trim())
+          ? `${systemForThis}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
           : 'Return ONLY a single character: 1 (keep) or 0 (delete).';
         const result = await chat(
           sysForBinary,
@@ -316,14 +318,14 @@ export default async function photos(job) {
       // NON-OPENVERSE PATH: keep existing behavior (score numeric, threshold)
       let score = 0;
       try {
-        const userPrompt = typeof userTemplate === 'string'
-          ? userTemplate
-              .replace('{{imageUrl}}', srcUrl)
-              .replace('{{locationName}}', location.name || '')
-              .replace('{{catchmentName}}', location.c_name || '')
-          : '';
+        const ctx2 = { imageUrl: srcUrl, locationName: location.name || '', catchmentName: location.c_name || '' };
+        const sysTmpl2 = sysPromptRow?.text || '';
+        const userTmpl2 = userPromptRow?.text || '';
+        const systemForThis2 = applyTemplate(sysTmpl2, ctx2);
+        const userPrompt = applyTemplate(userTmpl2, ctx2);
+
         const scoreTxt = await chat(
-          sysPrompt,
+          systemForThis2,
           userPrompt,
           0,
           modelForScoring

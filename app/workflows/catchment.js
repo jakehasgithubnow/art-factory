@@ -7,6 +7,11 @@ import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
 import { getByKey as getSystemPromptRow } from '../db/systemPrompts.js';
 
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx?.[k] != null ? String(ctx[k]) : ''));
+}
+
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
@@ -14,10 +19,10 @@ export default async function catchment(job) {
 
   const sysRow = await getSystemPromptRow('catchment_intro_system');
   const userRow = await getSystemPromptRow('catchment_intro_user');
-  const sysPrompt = sysRow?.text;
-  const userPromptTemplate = userRow?.text;
   const model = sysRow?.model || userRow?.model || 'gpt-4o-mini';
-  const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
+  const ctx = { catchmentName: row.name, lat: row.lat, lon: row.lon };
+  const sysPrompt = applyTemplate(sysRow?.text, ctx);
+  const userPrompt = applyTemplate(userRow?.text, ctx);
 
   const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
   const safeUser = typeof userPrompt === 'string' ? userPrompt : `Write a short introduction for ${row.name}.`;

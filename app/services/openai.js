@@ -26,7 +26,7 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
       },
       body: JSON.stringify({
         model,
-        temperature,
+        ...( /^gpt-5/.test(model) ? {} : { temperature } ),
         messages: [
           { role: 'system', content: system },
           {
@@ -133,7 +133,7 @@ export async function chatJson({
           },
         body: JSON.stringify({
           model,
-          temperature,
+          ...( /^gpt-5/.test(model) ? {} : { temperature } ),
           response_format,
           messages: [
             { role: 'system', content: schema ? `${system}\n\nReturn ONLY minified JSON strictly matching the provided schema.` : `${system}\n\nReturn ONLY minified JSON.` },

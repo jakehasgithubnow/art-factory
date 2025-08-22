@@ -3,6 +3,11 @@ import { chatJson } from '../services/openai.js';
 import { qPhoto } from '../queue/queues.js';
 import { getPlaceDetails } from '../services/google.js';
 
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
 const PLACES_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -50,15 +55,12 @@ export default async function locations(job) {
   // Load system prompt for location places from DB
   const { getByKey } = await import('../db/systemPrompts.js');
   const sysPromptRow = await getByKey('location_places_system');
-  const system = sysPromptRow?.text;
-
   const { getByKey: getUserPrompt } = await import('../db/systemPrompts.js');
   const userPromptRow = await getUserPrompt('location_places_user');
-  const userTemplate = userPromptRow?.text;
-  const user = userTemplate
-    ?.replace('{{lat}}', catchment.lat)
-    ?.replace('{{lon}}', catchment.lon)
-    ?.replace('{{catchmentName}}', catchment.name);
+
+  const ctx = { lat: catchment.lat, lon: catchment.lon, catchmentName: catchment.name };
+  const system = applyTemplate(sysPromptRow?.text, ctx);
+  const user = applyTemplate(userPromptRow?.text, ctx);
 
   const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 

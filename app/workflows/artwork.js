@@ -5,6 +5,11 @@ import { createMockups } from '../services/framemock.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
 
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
 // Read configuration (prefer env helper, fallback to process.env)
 import { env } from '../config/env.js';
 const PAINT_ENDPOINT = (env && (env.paintEndpoint || env.PAINT_ENDPOINT)) || process.env.PAINT_ENDPOINT;
@@ -37,6 +42,23 @@ export default async function artwork(job) {
   }
   const photo = await db('photos').where({ id: photoId }).first();
   if (!photo || !photo.processed) return;
+
+  let locMeta = {};
+  try {
+    if (photo?.location_id) {
+      const meta = await db('locations as l')
+        .leftJoin('catchments as c', 'c.id', 'l.catchment_id')
+        .where('l.id', photo.location_id)
+        .first([
+          db.raw('l.name as location_name'),
+          db.raw('c.name as catchment_name')
+        ]);
+      locMeta = {
+        locationName: meta?.location_name || '',
+        catchmentName: meta?.catchment_name || ''
+      };
+    }
+  } catch (_) {}
 
   if (!PAINT_ENDPOINT) {
     throw new Error('PAINT_ENDPOINT is not configured');
@@ -173,9 +195,11 @@ export default async function artwork(job) {
         // Load system prompt for artwork description from DB
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
-        const sysPrompt = sysPromptRow?.text;
         const userPromptRow = await getByKey('artwork_description_user');
-        const userPromptTemplate = userPromptRow?.text || 'Describe the colours, medium and vibe of the painting at {url}';
+        const defaultUser = 'Describe the colours, medium and vibe of the painting at {url}';
+        const ctx = { imageUrl: String(mainPaintingUrl), ...locMeta };
+        const sysPrompt = applyTemplate(sysPromptRow?.text, ctx);
+        const userPromptTemplate = applyTemplate(userPromptRow?.text || defaultUser, ctx);
         const instruction = userPromptTemplate.replace('at {url}', '').replace('{url}', '').trim();
         const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 
