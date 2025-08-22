@@ -114,6 +114,12 @@ export default async function artwork(job) {
       const timeoutId = setTimeout(() => controller.abort(), 310_000);
 
       try {
+        // Interpolate template variables in the style prompt (supports both camelCase and lowercase keys).
+        const resolvedPrompt = applyTemplate(stylePrompt.text, {
+          ...locMeta,
+          locationname: (locMeta && locMeta.locationName) || '',
+          catchmentname: (locMeta && locMeta.catchmentName) || ''
+        });
         if (usePiapi) {
           // --- DEBUG LOGS START ---
           console.log('[artwork][DEBUG] Piapi debug pre-flight:');
@@ -130,9 +136,9 @@ export default async function artwork(job) {
           }
           // --- DEBUG LOGS END ---
 // Use updated generateImage helper with both prompt and imageUrl
-          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${stylePrompt.text}`);
+          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${resolvedPrompt}`);
           const imageUrls = await generateImage({
-            prompt: stylePrompt.text,
+            prompt: resolvedPrompt,
             imageUrl: imageSource,
           });
           let localPromptPaintingUrls = [];
@@ -143,14 +149,14 @@ export default async function artwork(job) {
           }
           res = { status: imageUrls && imageUrls.length > 0 ? 200 : 500, ok: imageUrls && imageUrls.length > 0, body: null, promptPaintingUrls: localPromptPaintingUrls };
         } else {
-          console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
+          console.log(`[artwork] Sending request to legacy paint service with style prompt: ${resolvedPrompt}`);
           res = await fetch(PAINT_ENDPOINT, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               ...(PAINT_API_KEY ? { 'Authorization': `Bearer ${PAINT_API_KEY}` } : {})
             },
-            body: JSON.stringify({ image: imageSource, prompt: stylePrompt.text }),
+            body: JSON.stringify({ image: imageSource, prompt: resolvedPrompt }),
             signal: controller.signal
           });
         }
