@@ -115,11 +115,11 @@ function normalizeImages(images) {
     .filter(Boolean);
 }
 
-export async function createCollection(title, bodyHtml, handle) {
+export async function createCollection(title, bodyHtml, handle, templateSuffix = 'geographic') {
   const traceId = randomUUID();
   log({ event: 'create_collection_start', traceId, title, handle });
 
-  const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle } });
+  const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle, template_suffix: templateSuffix } });
   const data = await fetchJson('/custom_collections.json', { method: 'POST', body });
   const id = data?.custom_collection?.id;
   log({ event: 'create_collection_response', traceId, hasId: Boolean(id) });
@@ -303,6 +303,81 @@ export async function setMetafieldsGraphQL(ownerId, metafields) {
   }
 
   return out;
+}
+
+/**
+ * Set a collection's templateSuffix via Admin GraphQL collectionUpdate.
+ *
+ * @param {string} ownerId - GID for the Collection: gid://shopify/Collection/{id}
+ * @param {string} templateSuffix - e.g. 'geographic'
+ * @returns {Promise<Object>} - GraphQL response collectionUpdate payload
+ */
+export async function setCollectionTemplateGraphQL(ownerId, templateSuffix = 'geographic') {
+  if (!ownerId) throw new Error('setCollectionTemplateGraphQL: ownerId is required');
+  const traceId = randomUUID();
+
+  const query = `
+    mutation updateCollection($input: CollectionInput!) {
+      collectionUpdate(input: $input) {
+        collection { id templateSuffix }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = { input: { id: ownerId, templateSuffix } };
+  const body = JSON.stringify({ query, variables });
+  const res = await fetchJson('/graphql.json', { method: 'POST', body });
+
+  const topErrors = Array.isArray(res?.errors)
+    ? res.errors.map(e => ({
+        field: Array.isArray(e?.path) ? e.path.join('.') : undefined,
+        message: e?.message || 'GraphQL error'
+      }))
+    : [];
+
+  if (topErrors.length) {
+    log({ event: 'graphql_collection_update_top_errors', traceId, errors: topErrors });
+    if (env.requireMetafieldsSuccess) {
+      const err = new Error(`Shopify GraphQL errors: ${JSON.stringify(topErrors)}`);
+      err.context = { ownerId, topErrors };
+      throw err;
+    }
+    return { collectionUpdate: { collection: null, userErrors: topErrors } };
+  }
+
+  const out = res?.data?.collectionUpdate || res?.collectionUpdate || res;
+  const userErrors = Array.isArray(out?.userErrors) ? out.userErrors : [];
+
+  log({
+    event: 'graphql_collection_update_res',
+    traceId,
+    templateSuffix,
+    errors: userErrors.map(e => ({ field: e.field, message: e.message })),
+  });
+
+  if (userErrors.length && env.requireMetafieldsSuccess) {
+    const errMsg = JSON.stringify(userErrors);
+    const err = new Error(`Shopify collectionUpdate returned userErrors: ${errMsg}`);
+    err.context = { ownerId, userErrors };
+    throw err;
+  }
+
+  return out;
+}
+
+/**
+ * REST fallback to set a collection's template suffix.
+ * @param {number|string} id - Numeric REST id of the collection
+ * @param {string} templateSuffix
+ */
+export async function updateCollectionTemplateREST(id, templateSuffix = 'geographic') {
+  if (!id) throw new Error('updateCollectionTemplateREST: id is required');
+  const traceId = randomUUID();
+  const body = JSON.stringify({ custom_collection: { template_suffix: templateSuffix } });
+  log({ event: 'rest_update_collection_template', traceId, id, templateSuffix });
+  await fetchJson(`/custom_collections/${id}.json`, { method: 'PUT', body });
+  return true;
 }
 
 /**

@@ -1,6 +1,6 @@
 import db from '../db/client.js';
 import { chat, chatJson } from '../services/openai.js';
-import { createCollection, setMetafieldsGraphQL } from '../services/shopify.js';
+import { createCollection, setMetafieldsGraphQL, setCollectionTemplateGraphQL, updateCollectionTemplateREST } from '../services/shopify.js';
 import { qLocation } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
@@ -71,6 +71,32 @@ if (!blurb) {
 
   const handle = row.name.toLowerCase().replace(/\s+/g, '-');
   const shopifyId = await createCollection(row.name, blurb || safeUser, handle);
+
+  // Ensure collection theme template is 'geographic'
+  try {
+    const collectionOwnerId = `gid://shopify/Collection/${shopifyId}`;
+    const upd = await setCollectionTemplateGraphQL(collectionOwnerId, 'geographic');
+    const applied =
+      upd?.collection?.templateSuffix ||
+      upd?.collectionUpdate?.collection?.templateSuffix ||
+      null;
+
+    if (typeof job.log === 'function') {
+      job.log({ event: 'collection_template_set', ownerId: collectionOwnerId, applied });
+    }
+
+    if (applied !== 'geographic') {
+      await updateCollectionTemplateREST(shopifyId, 'geographic');
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_rest_fallback', id: shopifyId });
+    }
+  } catch (e) {
+    try {
+      await updateCollectionTemplateREST(shopifyId, 'geographic');
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_rest_on_error', id: shopifyId, error: e.message });
+    } catch (e2) {
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_set_error', error: e2.message });
+    }
+  }
 
 // Attach collection metafields for location data (latitude, longitude, city_name)
 try {

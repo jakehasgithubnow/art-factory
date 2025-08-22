@@ -176,12 +176,12 @@ export default async function artwork(job) {
         const sysPrompt = sysPromptRow?.text;
         const userPromptRow = await getByKey('artwork_description_user');
         const userPromptTemplate = userPromptRow?.text || 'Describe the colours, medium and vibe of the painting at {url}';
-        const userPrompt = userPromptTemplate.replace('{url}', String(mainPaintingUrl));
+        const instruction = userPromptTemplate.replace('at {url}', '').replace('{url}', '').trim();
 
         try {
           description = await chat(
             sysPrompt,
-            userPrompt
+            { text: instruction, imageUrls: [String(mainPaintingUrl)] }
           );
         } catch (e) {
           console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
@@ -377,10 +377,10 @@ export default async function artwork(job) {
     const sysPrompt2 = sysPromptRow2?.text;
     const userPromptRow2 = await getSysPrompt('artwork_description_user');
     const userPromptTemplate2 = userPromptRow2?.text || 'Describe the colours, medium and vibe of the painting at {url}';
-    const userPrompt2 = userPromptTemplate2.replace('{url}', String(mainPaintingUrl));
+    const instruction2 = userPromptTemplate2.replace('at {url}', '').replace('{url}', '').trim();
     const description = await chat(
       sysPrompt2,
-      userPrompt2
+      { text: instruction2, imageUrls: [String(mainPaintingUrl)] }
     );
 
     // Mark artwork as completed in tracker

@@ -3,6 +3,7 @@ import db from '../../db/client.js';
 import { qPublish } from '../../queue/queues.js';
 import { requireApiKey } from '../middleware/requireApiKey.js';
 import { createMockups } from '../../services/framemock.js';
+import { deleteImage } from '../../services/cloudinary.js';
 
 const router = express.Router();
 
@@ -46,9 +47,35 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
     if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
 
     if (action === 'reject') {
-      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
-      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
-      return res.json({ ok: true, status: 'rejected' });
+      // Load the artwork row to determine Cloudinary identifier(s)
+      const art = await db('artwork').where({ id }).first();
+
+      // Best-effort: delete the Cloudinary asset for this artwork
+      try {
+        if (art?.image_url) {
+          await deleteImage({ url: art.image_url });
+        } else if (art?.photo_id && art?.style_prompt_id != null) {
+          // Reconstruct the deterministic publicId used during upload
+          const fallbackPublicId = `art-factory/artwork/artwork_${art.photo_id}_${art.style_prompt_id}_0`;
+          await deleteImage({ publicId: fallbackPublicId });
+        }
+      } catch (err) {
+        console.warn('moderate_artwork.reject: cloudinary_delete_failed', { artworkId: id, error: err && err.message });
+      }
+
+      // Remove any pending publish job for this artwork (if previously enqueued)
+      try {
+        const job = await qPublish.getJob(`publish:${id}`);
+        if (job) await job.remove();
+      } catch (err) {
+        console.warn('moderate_artwork.reject: remove_publish_job_failed', { artworkId: id, error: err && err.message });
+      }
+
+      // Permanently remove the artwork from the database so it no longer appears in moderation
+      await db('artwork').where({ id }).del();
+
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject_delete', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'deleted' });
     }
 
     console.log('moderationArtwork: approve branch entered', { id, action });

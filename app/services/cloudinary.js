@@ -133,3 +133,83 @@ export async function uploadImage(
   }
   throw lastErr || new Error('Unknown Cloudinary upload error');
 }
+
+// Attempt to derive a Cloudinary publicId from a secure URL
+function parsePublicIdFromUrl(url) {
+  try {
+    const u = new URL(String(url));
+    if (!/res\.cloudinary\.com$/i.test(u.hostname)) return null;
+
+    const marker = '/image/upload/';
+    const idx = u.pathname.indexOf(marker);
+    if (idx === -1) return null;
+
+    let rest = u.pathname.slice(idx + marker.length);
+    rest = rest.replace(/^\/+/, '');
+
+    // Strip version segment if present (e.g., v1699999999/)
+    const firstSeg = rest.split('/')[0];
+    if (/^v\d+$/i.test(firstSeg)) {
+      rest = rest.slice(firstSeg.length + 1);
+    }
+
+    // Remove file extension from the last segment
+    const lastDot = rest.lastIndexOf('.');
+    if (lastDot !== -1) rest = rest.slice(0, lastDot);
+
+    return decodeURIComponent(rest);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete an image from Cloudinary.
+ * Provide either a publicId or a Cloudinary URL. URL will be parsed to publicId.
+ *
+ * @param {Object} args
+ * @param {string} [args.publicId]
+ * @param {string} [args.url]
+ * @param {boolean} [args.invalidate=true]
+ * @param {number} [args.timeoutMs=DEFAULT_TIMEOUT_MS]
+ * @param {number} [args.retries=DEFAULT_RETRIES]
+ */
+export async function deleteImage({
+  publicId,
+  url,
+  invalidate = true,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  retries = DEFAULT_RETRIES
+} = {}) {
+  let pid = publicId;
+  if (!pid && url) {
+    pid = parsePublicIdFromUrl(url);
+  }
+  if (!pid) throw new Error('deleteImage: "publicId" or a Cloudinary URL "url" is required');
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await cloudinary.v2.uploader.destroy(pid, {
+        resource_type: 'image',
+        invalidate,
+        timeout: timeoutMs
+      });
+      // Treat "not found" as success (idempotent delete)
+      if (result?.result === 'ok' || result?.result === 'not found') {
+        return result;
+      }
+      // If Cloudinary returns unexpected shape, consider it success
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryable(err)) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('Unknown Cloudinary delete error');
+}
