@@ -1,6 +1,6 @@
 import express from 'express';
 import { requireApiKey } from '../../middleware/requireApiKey.js';
-import { getAll as getStylePrompts, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
+import { getAll as getStylePrompts, createPrompt as createStylePrompt, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
 import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
 
 function escapeHtml(str) {
@@ -56,6 +56,18 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             `).join('')}
             <button type="submit">Save Style Prompts</button>
           </form>
+
+          <h2>Add New Style Prompt</h2>
+          <form method="POST" action="/admin/style-prompts-ui/create">
+            <div>
+              <label for="new-style-text">New Prompt Text</label><br/>
+              <textarea id="new-style-text" name="text" rows="2" cols="80"></textarea><br/>
+              <label>
+                <input type="checkbox" name="enabled" checked/> Enabled
+              </label>
+            </div>
+            <button type="submit">Add Style Prompt</button>
+          </form>
         </body>
       </html>
     `);
@@ -97,6 +109,22 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
         }
         await toggleStylePrompt(id, enabled);
       }
+    }
+    res.redirect('/admin/style-prompts-ui');
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Create a new style prompt from the UI
+ */
+router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
+  try {
+    const text = req.body?.text;
+    const enabled = req.body?.enabled !== undefined;
+    if (typeof text === 'string' && text.trim().length > 0) {
+      await createStylePrompt(text.trim(), enabled);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
