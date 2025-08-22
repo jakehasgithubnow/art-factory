@@ -68,7 +68,7 @@ export default async function publish(job) {
   }
   const artDetails = tryParseArtworkDetails(art.description);
   const ctx = { locationName: row.location_name || '' };
-  const title = artDetails ? (applyTemplate(artDetails.title, ctx) || `${row.location_name} – Bomberg Series`) : `${row.location_name} – Bomberg Series`;
+  const title = artDetails ? (artDetails.title || `${row.location_name} – Bomberg Series`) : `${row.location_name} – Bomberg Series`;
   const bodyHtml = artDetails ? (applyTemplate(artDetails.description, ctx) || '') : (art.description ?? '');
 
   // Attempt mockup generation if none exist
