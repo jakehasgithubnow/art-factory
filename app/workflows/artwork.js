@@ -51,11 +51,14 @@ export default async function artwork(job) {
         .where('l.id', photo.location_id)
         .first([
           db.raw('l.name as location_name'),
-          db.raw('c.name as catchment_name')
+          db.raw('c.name as catchment_name'),
+          db.raw('c.phrases as catchment_phrases')
         ]);
+      const phrasesArr = Array.isArray(meta?.catchment_phrases) ? meta.catchment_phrases : [];
       locMeta = {
         locationName: meta?.location_name || '',
-        catchmentName: meta?.catchment_name || ''
+        catchmentName: meta?.catchment_name || '',
+        phrases: JSON.stringify(phrasesArr)
       };
     }
   } catch (_) {}
@@ -98,9 +101,9 @@ export default async function artwork(job) {
       throw new Error('PAINT_API_KEY is required for PiAPI endpoint');
     }
 
-    // Fetch enabled style prompts from DB
+    // Fetch enabled style prompts from DB (location-scoped only)
     const { getEnabled } = await import('../db/stylePrompts.js');
-    const enabledPrompts = await getEnabled();
+    const enabledPrompts = await getEnabled('location');
     if (!enabledPrompts || enabledPrompts.length === 0) {
       console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
       return;

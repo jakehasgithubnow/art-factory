@@ -17,11 +17,11 @@ router.get('/', async (req, res) => {
 // Create a prompt
 router.post('/', async (req, res) => {
   try {
-    const { text, enabled } = req.body;
-    if (!text || typeof text !== 'string') {
+    const { text, enabled, model, scope } = req.body;
+    if (typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Prompt text is required' });
     }
-    const prompt = await stylePrompts.createPrompt(text, enabled);
+    const prompt = await stylePrompts.createPrompt(text.trim(), enabled, model, scope);
     res.status(201).json(prompt);
   } catch (err) {
     console.error('Failed to create style prompt', err);
@@ -29,14 +29,31 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update prompt text
+// Update prompt (text/model/scope)
 router.patch('/:id', async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || typeof text !== 'string') {
-      return res.status(400).json({ error: 'Prompt text is required' });
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
     }
-    const prompt = await stylePrompts.updatePrompt(req.params.id, text);
+
+    const { text, model, scope } = req.body;
+
+    if (text === undefined && model === undefined && scope === undefined) {
+      return res.status(400).json({ error: 'Nothing to update. Provide one of: text, model, scope.' });
+    }
+
+    if (text !== undefined && typeof text !== 'string') {
+      return res.status(400).json({ error: 'Prompt text must be a string if provided' });
+    }
+    if (model !== undefined && model !== null && typeof model !== 'string') {
+      return res.status(400).json({ error: 'Model must be a string or null' });
+    }
+    if (scope !== undefined && scope !== null && typeof scope !== 'string') {
+      return res.status(400).json({ error: 'Scope must be a string or null' });
+    }
+
+    const prompt = await stylePrompts.updatePrompt(id, text, model, scope);
     res.json(prompt);
   } catch (err) {
     console.error('Failed to update style prompt', err);

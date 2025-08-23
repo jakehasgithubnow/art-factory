@@ -6,6 +6,7 @@ import locations from '../workflows/locations.js';
 import photos from '../workflows/photos.js';
 import artwork from '../workflows/artwork.js';
 import publish from '../workflows/publish.js';
+import catchmentArtwork from '../workflows/catchmentArtwork.js';
 
 // Use same prefix as queues to ensure workers consume the correct streams
 const PREFIX = process.env.QUEUE_PREFIX || 'art-factory';
@@ -17,6 +18,7 @@ const CONCURRENCY = {
   photo:     parseInt(process.env.CONCURRENCY_PHOTO     || '4', 10),
   artwork:   parseInt(process.env.CONCURRENCY_ARTWORK   || '2', 10),
   publish:   parseInt(process.env.CONCURRENCY_PUBLISH   || '2', 10),
+  catchmentArtwork: parseInt(process.env.CONCURRENCY_CATCHMENT_ARTWORK || '2', 10),
 };
 
 function makeWorker(name, processor, concurrency) {
@@ -55,3 +57,4 @@ makeWorker('location',  locations, CONCURRENCY.location);
 makeWorker('photo',     photos,    CONCURRENCY.photo);
 makeWorker('artwork',   artwork,   CONCURRENCY.artwork);
 makeWorker('publish',   publish,   CONCURRENCY.publish);
+makeWorker('catchmentArtwork', catchmentArtwork, CONCURRENCY.catchmentArtwork);

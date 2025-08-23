@@ -178,6 +178,29 @@ create unique index if not exists artwork_shopify_unique
 
 create index if not exists idx_artwork_created_at on artwork(created_at);
 
+-- ===================== 4b. Catchment Artwork ========================
+create table if not exists catchment_artwork (
+  id               uuid primary key default gen_random_uuid(),
+  catchment_id     uuid not null references catchments(id) on delete cascade,
+  style_prompt_id  integer references style_prompts(id),
+  style_name       text,
+  image_url        text not null,
+  description      text,
+  mockup_urls      jsonb default '[]'::jsonb,
+  shopify_id       text,
+  approved_for_publish boolean default false,
+  moderated_at     timestamptz,
+  published        boolean not null default false,
+  created_at       timestamptz default now()
+);
+
+-- One artwork per catchment per style
+create unique index if not exists catchment_artwork_unique_per_catchment_style
+  on catchment_artwork(catchment_id, style_prompt_id);
+
+create index if not exists idx_catchment_artwork_catchment on catchment_artwork(catchment_id);
+create index if not exists idx_catchment_artwork_published on catchment_artwork(published);
+
 -- ===================== Orchestration =====================
 -- We are using code-driven queue chaining (Option A). Remove LISTEN/NOTIFY triggers.
 -- Drop old triggers/functions if they exist so schemas remain clean.
@@ -194,12 +217,16 @@ create table if not exists style_prompts (
   id serial primary key,
   text text not null,
   model text,
+  scope text not null default 'location',
   enabled boolean not null default true,
   updated_at timestamptz default now(),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  constraint style_prompts_scope_check check (scope in ('location','catchment'))
 );
 
 create index if not exists idx_style_prompts_enabled on style_prompts(enabled);
+create index if not exists idx_style_prompts_scope on style_prompts(scope);
+create index if not exists idx_style_prompts_enabled_scope on style_prompts(enabled, scope);
 
 -- ===================== Quality-of-life ===================
 create index if not exists idx_catchments_processed on catchments(processed);

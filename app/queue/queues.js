@@ -36,6 +36,7 @@ export const qLocation  = createQueue('location');
 export const qPhoto     = createQueue('photo');
 export const qArtwork   = createQueue('artwork');
 export const qPublish   = createQueue('publish');
+export const qCatchmentArtwork = createQueue('catchmentArtwork');
 
 // Optionally export the shared connection for workers
 export { connection };

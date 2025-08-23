@@ -1,7 +1,7 @@
 import db from '../db/client.js';
 import { chat, chatJson } from '../services/openai.js';
 import { createCollection, setMetafieldsGraphQL, setCollectionTemplateGraphQL, updateCollectionTemplateREST } from '../services/shopify.js';
-import { qLocation } from '../queue/queues.js';
+import { qLocation, qCatchmentArtwork } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
@@ -15,7 +15,7 @@ function applyTemplate(str, ctx) {
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
-  if (!row || row.processed) return;
+  if (!row) return;
 
   const sysRow = await getSystemPromptRow('catchment_intro_system');
   const userRow = await getSystemPromptRow('catchment_intro_user');
@@ -27,11 +27,51 @@ export default async function catchment(job) {
   const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
   const safeUser = typeof userPrompt === 'string' ? userPrompt : `Write a short introduction for ${row.name}.`;
 
+  // If already processed but missing phrases, backfill phrases only and exit
+  if (row.processed && (!Array.isArray(row.phrases) || row.phrases.length === 0)) {
+    try {
+      const json = await chatJson({
+        system: safeSystem,
+        user: safeUser,
+        schema: {
+          type: 'object',
+          properties: {
+            blurb: { type: 'string' },
+            latitude: { type: 'number' },
+            longitude: { type: 'number' },
+            phrases: {
+              type: 'array',
+              items: { type: 'string' }
+            }
+          },
+          required: ['blurb', 'latitude', 'longitude'],
+          additionalProperties: false
+        },
+        temperature: 0,
+        model
+      });
+
+      const parsedPhrases = Array.isArray(json?.phrases)
+        ? json.phrases.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim())
+        : [];
+
+      if (parsedPhrases.length) {
+        await db('catchments')
+          .where({ id: catchmentId })
+          .update({ phrases: db.raw('?::jsonb', [JSON.stringify(parsedPhrases)]) });
+      }
+    } catch (e) {
+      // ignore backfill errors; keep existing data
+    }
+    return;
+  }
+
   let blurb = row.intro;
 let latForMeta = row.lat;
 let lonForMeta = row.lon;
+let phrases = Array.isArray(row?.phrases) ? row.phrases : [];
 
-if (!blurb) {
+if (!blurb || !phrases.length) {
   try {
     const json = await chatJson({
       system: safeSystem,
@@ -41,7 +81,11 @@ if (!blurb) {
         properties: {
           blurb: { type: 'string' },
           latitude: { type: 'number' },
-          longitude: { type: 'number' }
+          longitude: { type: 'number' },
+          phrases: {
+            type: 'array',
+            items: { type: 'string' }
+          }
         },
         required: ['blurb', 'latitude', 'longitude'],
         additionalProperties: false
@@ -56,6 +100,11 @@ if (!blurb) {
     const lonParsed = Number(json?.longitude);
     if (Number.isFinite(latParsed)) latForMeta = latParsed;
     if (Number.isFinite(lonParsed)) lonForMeta = lonParsed;
+
+    const parsedPhrases = Array.isArray(json?.phrases)
+      ? json.phrases.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim())
+      : [];
+    if (parsedPhrases.length) phrases = parsedPhrases;
 
     if (!blurb) throw new Error('missing blurb');
   } catch (e) {
@@ -124,8 +173,16 @@ try {
   await db('catchments').where({ id: catchmentId }).update({
     intro: blurb,
     shopify_id: shopifyId,
-    processed: true
+    processed: true,
+    phrases: db.raw('?::jsonb', [JSON.stringify(phrases)])
   });
+
+  // Enqueue catchment-level artwork generation (once per catchment, using catchment lat/lon)
+  try {
+    await qCatchmentArtwork.add('catchmentArtwork', { catchmentId }, { jobId: `catchmentArtwork:${catchmentId}` });
+  } catch (e) {
+    if (typeof job.log === 'function') job.log({ event: 'enqueue_catchment_artwork_error', error: e.message });
+  }
 
   await qLocation.add('location', { catchmentId, imageSource: row.image_source || imageSource }, { jobId: `location:${catchmentId}` });
 }

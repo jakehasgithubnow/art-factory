@@ -34,6 +34,13 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
         </select>
       </label>
     `;
+    const renderScopeSelect = (name, selected) => `
+      <label>Scope
+        <select name="${name}">
+          ${['location','catchment'].map(s => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </label>
+    `;
 
     res.set('Cache-Control', 'no-store');
 
@@ -99,6 +106,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                 <label for="style-${p.id}">Prompt #${p.id}</label><br/>
                 <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
                 ${renderModelSelect(`model_${p.id}`, p.model)}<br/>
+                ${renderScopeSelect(`scope_${p.id}`, p.scope)}<br/>
                 <label>
                   <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
                 </label>
@@ -113,6 +121,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               <label for="new-style-text">New Prompt Text</label><br/>
               <textarea id="new-style-text" name="text" rows="2" cols="80"></textarea><br/>
               ${renderModelSelect('model', null)}<br/>
+              ${renderScopeSelect('scope', 'location')}<br/>
               <label>
                 <input type="checkbox" name="enabled" checked/> Enabled
               </label>
@@ -160,6 +169,7 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
     const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
     const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
+    const normScope = (s) => (String(s || 'location') === 'catchment' ? 'catchment' : 'location');
 
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
@@ -167,12 +177,10 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
         const text = req.body[`text_${id}`];
         const enabled = req.body[`enabled_${id}`] !== undefined;
         const model = normModel(req.body[`model_${id}`]);
+        const scope = normScope(req.body[`scope_${id}`]);
 
-        if (text !== undefined) {
-          await updateStylePrompt(id, text, model);
-        } else if (model !== null) {
-          // If only model changed and no text field present, still persist model change
-          await updateStylePrompt(id, undefined, model);
+        if (text !== undefined || model !== null || scope) {
+          await updateStylePrompt(id, text, model, scope);
         }
         await toggleStylePrompt(id, enabled);
       }
@@ -193,9 +201,10 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
     const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
     const modelInput = req.body?.model;
     const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
+    const scope = String(req.body?.scope || 'location') === 'catchment' ? 'catchment' : 'location';
 
     if (typeof text === 'string' && text.trim().length > 0) {
-      await createStylePrompt(text.trim(), enabled, model);
+      await createStylePrompt(text.trim(), enabled, model, scope);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
