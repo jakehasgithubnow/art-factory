@@ -18,12 +18,20 @@ export default async function catchmentArtwork(job) {
 
   // Context uses catchment lat/lon
   const phrasesArr = Array.isArray(c?.phrases) ? c.phrases : [];
+  const phrasesBulleted = phrasesArr
+    .map(p => (typeof p === 'string' ? `- ${p}`.trim() : ''))
+    .filter(Boolean)
+    .join('\n');
   const ctx = {
     catchmentName: c.name || '',
     catchmentname: c.name || '',
     lat: c.lat,
     lon: c.lon,
-    phrases: JSON.stringify(phrasesArr)
+    // Structured JSON form
+    phrases: JSON.stringify(phrasesArr),
+    // Human-friendly variants
+    phrasesBulleted,
+    phrasesCsv: phrasesArr.filter(p => typeof p === 'string' && p.trim()).join(', ')
   };
 
   // Fetch enabled catchment-scoped style prompts

@@ -44,7 +44,7 @@ export default async function catchment(job) {
               items: { type: 'string' }
             }
           },
-          required: ['blurb', 'latitude', 'longitude'],
+          required: ['blurb', 'latitude', 'longitude', 'phrases'],
           additionalProperties: false
         },
         temperature: 0,
@@ -87,7 +87,7 @@ if (!blurb || !phrases.length) {
             items: { type: 'string' }
           }
         },
-        required: ['blurb', 'latitude', 'longitude'],
+        required: ['blurb', 'latitude', 'longitude', 'phrases'],
         additionalProperties: false
       },
       temperature: 0,
