@@ -68,6 +68,9 @@ app.use((req, res, next) => {
  */
 app.use('/', (await import('./server/routes/moderationArtwork.js')).default);
 app.use('/', (await import('./server/routes/moderationArtworkUI.js')).default);
+// Catchment-level artwork (API + UI)
+app.use('/', (await import('./server/routes/admin/catchmentArtwork.js')).default);
+app.use('/', (await import('./server/routes/moderationCatchmentArtworkUI.js')).default);
 
 // ---------- Moderation UI (Photos by Location: up to 20 images, default PASS, toggle FAIL, Next) ----------
 app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
