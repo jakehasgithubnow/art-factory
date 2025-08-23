@@ -153,13 +153,13 @@ export default async function publish(job) {
       }
       if (art.image_url) {
         console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
-        const { frameUrl1, frameUrl2, frameUrl3, defaultOrientation } = (await import('../config/env.js')).env;
+        const { frameUrl1, frameUrl2, frameUrl3 } = (await import('../config/env.js')).env;
         const generated = await createMockups({
           frameUrl1,
           frameUrl2,
           frameUrl3,
           artUrl: art.image_url,
-          orientation: defaultOrientation || 'horizontal',
+          orientation: 'auto',
           enableInnerShadow: true
         });
         console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });

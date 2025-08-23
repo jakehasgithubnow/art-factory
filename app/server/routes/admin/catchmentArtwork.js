@@ -138,7 +138,15 @@ router.post('/moderate/catchment-artwork/:id', requireApiKey, async (req, res, n
       console.error('No image_url for catchment_artwork, cannot generate mockups', { id });
     } else {
       try {
-        const mockupUrls = await createMockups(art.image_url);
+        const { frameMockUrl, frameMockApiKey, frameUrl1, frameUrl2, frameUrl3 } = (await import('../../config/env.js')).env;
+        const mockupUrls = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation: 'auto',
+          enableInnerShadow: true
+        });
         await db('catchment_artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
         if (typeof req.log === 'function') {
           req.log({ event: 'generate_catchment_mockups', artworkId: id, mockupsCount: mockupUrls.length });

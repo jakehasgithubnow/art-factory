@@ -137,7 +137,7 @@ export async function createMockups({
   frameUrl2,
   frameUrl3,
   artUrl,
-  orientation = 'horizontal',
+  orientation = 'auto',
   enableInnerShadow = true
 }, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const traceId = randomUUID();
@@ -158,7 +158,7 @@ export async function createMockups({
     frameUrl2,
     frameUrl3,
     artUrl,
-    orientation: orientation || "horizontal",
+    orientation: (orientation === 'vertical' ? 'auto' : (orientation || 'auto')),
     enableInnerShadow: Boolean(enableInnerShadow)
   };
 

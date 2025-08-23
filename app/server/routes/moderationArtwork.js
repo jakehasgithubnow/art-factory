@@ -133,7 +133,7 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
       console.error('No image_url for artwork, cannot generate mockups', { id });
     } else {
       // Check environment variables needed for framemock
-      const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+      const { frameMockUrl, frameMockApiKey, frameUrl1, frameUrl2, frameUrl3 } = (await import('../../config/env.js')).env;
       if (!frameMockUrl) {
         console.error('Missing env.frameMockUrl');
       }
@@ -143,7 +143,14 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
 
       try {
         console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
-        const mockupUrls = await createMockups(art.image_url);
+        const mockupUrls = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation: 'auto',
+          enableInnerShadow: true
+        });
         console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
         await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
         if (typeof req.log === 'function') {
