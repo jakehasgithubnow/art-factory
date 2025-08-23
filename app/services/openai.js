@@ -205,7 +205,7 @@ export async function generateImage({ prompt, imageUrl, additionalImageUrls = []
       headers: {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+        Authorization: `Bearer ${process.env.PIAPI_API_KEY || process.env.PAINT_API_KEY || env.piapiKey || env.openaiKey}`,
       },
       body: JSON.stringify({
         model,
@@ -303,6 +303,12 @@ export async function generateImage({ prompt, imageUrl, additionalImageUrls = []
                   log({ event: "generateImage_found_url_fallback", traceId, imageUrl: u });
                 }
               }
+            }
+
+            // Early return as soon as we have at least one URL — prevents hanging on long streams
+            if (imageUrls.length > 0) {
+              log({ event: "generateImage_first_url", traceId, count: imageUrls.length });
+              return imageUrls;
             }
           } catch (e) {
             log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
