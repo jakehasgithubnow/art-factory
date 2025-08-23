@@ -147,17 +147,28 @@ function parsePublicIdFromUrl(url) {
     let rest = u.pathname.slice(idx + marker.length);
     rest = rest.replace(/^\/+/, '');
 
-    // Strip version segment if present (e.g., v1699999999/)
-    const firstSeg = rest.split('/')[0];
-    if (/^v\d+$/i.test(firstSeg)) {
-      rest = rest.slice(firstSeg.length + 1);
+    // Handle optional transformation segment(s) before version/publicId, e.g.:
+    // /image/upload/w_900/v123/folder/name.jpg  OR  /image/upload/c_fill,w_900/folder/name.jpg
+    const segs = rest.split('/').filter(Boolean);
+    let i = 0;
+
+    // If the first segment is not a version (v123...), treat it as transformations and skip it.
+    if (segs[i] && !/^v\d+$/i.test(segs[i]) && /[_,-]/.test(segs[i])) {
+      i++;
+    }
+    // Skip version segment if present
+    if (segs[i] && /^v\d+$/i.test(segs[i])) {
+      i++;
     }
 
-    // Remove file extension from the last segment
-    const lastDot = rest.lastIndexOf('.');
-    if (lastDot !== -1) rest = rest.slice(0, lastDot);
+    const publicIdPath = segs.slice(i).join('/');
+    if (!publicIdPath) return null;
 
-    return decodeURIComponent(rest);
+    // Remove file extension from the last segment
+    const lastDot = publicIdPath.lastIndexOf('.');
+    const withoutExt = lastDot !== -1 ? publicIdPath.slice(0, lastDot) : publicIdPath;
+
+    return decodeURIComponent(withoutExt);
   } catch {
     return null;
   }
@@ -218,15 +229,51 @@ export async function getOrientationByUrl(url, { defaultOrientation = 'auto' } =
   try {
     if (!url) return defaultOrientation;
     const pid = parsePublicIdFromUrl(url);
-    if (!pid) return defaultOrientation;
+    if (!pid) {
+      try {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          stage: 'frame_mock',
+          event: 'orientation_detected',
+          note: 'no_public_id',
+          host: (() => { try { return new URL(String(url)).host; } catch { return 'invalid'; } })(),
+          returned: defaultOrientation
+        }));
+      } catch {}
+      return defaultOrientation;
+    }
     const meta = await getImageMetadata(pid, { exif: true, context: false });
     const w = Number(meta?.width);
     const h = Number(meta?.height);
+    let ori = defaultOrientation;
     if (Number.isFinite(w) && Number.isFinite(h)) {
-      return w >= h ? 'horizontal' : 'vertical';
+      // Use a small hysteresis to avoid borderline flips
+      const ratio = h === 0 ? 1 : (w / h);
+      if (ratio >= 1.05) ori = 'horizontal';
+      else if (ratio <= 0.95) ori = 'vertical';
+      else ori = 'horizontal'; // treat near-square as horizontal
     }
-    return defaultOrientation;
-  } catch {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'frame_mock',
+        event: 'orientation_detected',
+        public_id: pid,
+        width: Number.isFinite(w) ? w : null,
+        height: Number.isFinite(h) ? h : null,
+        returned: ori
+      }));
+    } catch {}
+    return ori;
+  } catch (e) {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'frame_mock',
+        event: 'orientation_detect_error',
+        message: e?.message || String(e)
+      }));
+    } catch {}
     return defaultOrientation;
   }
 }

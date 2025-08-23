@@ -134,25 +134,48 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  */
 export function getFrameUrlsForOrientation(orientation = 'auto') {
   const o = typeof orientation === 'string' ? orientation.toLowerCase() : 'auto';
+
+  let selected;
+  let kind = 'default';
+
   if (o === 'horizontal') {
-    return {
+    selected = {
       frameUrl1: env.hframeUrl1 || env.frameUrl1,
       frameUrl2: env.hframeUrl2 || env.frameUrl2,
       frameUrl3: env.hframeUrl3 || env.frameUrl3,
     };
-  }
-  if (o === 'vertical') {
-    return {
+    kind = (env.hframeUrl1 || env.hframeUrl2 || env.hframeUrl3) ? 'horizontal' : 'default';
+  } else if (o === 'vertical') {
+    selected = {
       frameUrl1: env.vframeUrl1 || env.frameUrl1,
       frameUrl2: env.vframeUrl2 || env.frameUrl2,
       frameUrl3: env.vframeUrl3 || env.frameUrl3,
     };
+    kind = (env.vframeUrl1 || env.vframeUrl2 || env.vframeUrl3) ? 'vertical' : 'default';
+  } else {
+    selected = {
+      frameUrl1: env.frameUrl1,
+      frameUrl2: env.frameUrl2,
+      frameUrl3: env.frameUrl3,
+    };
+    kind = 'default';
   }
-  return {
-    frameUrl1: env.frameUrl1,
-    frameUrl2: env.frameUrl2,
-    frameUrl3: env.frameUrl3,
-  };
+
+  // Debug log which set was chosen and presence of envs (no URLs printed)
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: 'frame_mock',
+      event: 'frame_urls_selected',
+      orientation: o,
+      selected_kind: kind,
+      has_h: Boolean(env.hframeUrl1 || env.hframeUrl2 || env.hframeUrl3),
+      has_v: Boolean(env.vframeUrl1 || env.vframeUrl2 || env.vframeUrl3),
+      has_default: Boolean(env.frameUrl1 || env.frameUrl2 || env.frameUrl3),
+    }));
+  } catch {}
+
+  return selected;
 }
 
 export async function createMockups({
