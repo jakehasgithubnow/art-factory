@@ -35,6 +35,72 @@ export default async function catchmentArtwork(job) {
   };
   try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'ctx_ready', catchmentId, phrases_count: phrasesArr.length })); } catch (_) {}
 
+  // Ensure pseudo-location and pseudo-photo for catchment so we can reuse the unified artwork -> moderation -> publish flow
+  // Pseudo location: one row per catchment (unique by (catchment_id, lower(name)))
+  const pseudoLocationName = `Catchment – ${c.name || ''}`;
+  let pseudoLocation = await db('locations')
+    .where({ catchment_id: catchmentId })
+    .andWhereRaw('lower(name) = lower(?)', [pseudoLocationName])
+    .first();
+
+  if (!pseudoLocation) {
+    try {
+      const insLoc = await db('locations')
+        .insert({
+          catchment_id: catchmentId,
+          name: pseudoLocationName,
+          category: 'catchment',
+          // populate Google-esque lat/lng fields used by publish.js
+          g_lat: c.lat,
+          g_lng: c.lon,
+          processed: true
+        })
+        .returning(['id', 'name']);
+      pseudoLocation = insLoc?.[0] || null;
+    } catch (e) {
+      // Concurrent creation safety: if unique constraint hit, re-select
+      pseudoLocation = await db('locations')
+        .where({ catchment_id: catchmentId })
+        .andWhereRaw('lower(name) = lower(?)', [pseudoLocationName])
+        .first();
+    }
+  }
+
+  if (!pseudoLocation || !pseudoLocation.id) {
+    console.warn('[catchmentArtwork] Failed to ensure pseudo-location for catchment', { catchmentId });
+    return;
+  }
+
+  // Pseudo photo: one row per pseudo-location/catchment
+  const pseudoSrcUrl = `catchment:${catchmentId}`;
+  let pseudoPhoto = await db('photos')
+    .where({ location_id: pseudoLocation.id, src_url: pseudoSrcUrl })
+    .first();
+
+  if (!pseudoPhoto) {
+    try {
+      const insPhoto = await db('photos')
+        .insert({
+          location_id: pseudoLocation.id,
+          src_url: pseudoSrcUrl,
+          kept: true,
+          processed: true
+        })
+        .returning(['id']);
+      pseudoPhoto = insPhoto?.[0] || null;
+    } catch (e) {
+      // Concurrent creation safety: if unique constraint hit, re-select
+      pseudoPhoto = await db('photos')
+        .where({ location_id: pseudoLocation.id, src_url: pseudoSrcUrl })
+        .first();
+    }
+  }
+  const photoId = pseudoPhoto?.id;
+  if (!photoId) {
+    console.warn('[catchmentArtwork] Failed to ensure pseudo-photo for catchment', { catchmentId, locationId: pseudoLocation.id });
+    return;
+  }
+
   // Fetch enabled catchment-scoped style prompts
   const { getEnabled } = await import('../db/stylePrompts.js');
   const prompts = await getEnabled('catchment');
@@ -100,8 +166,8 @@ export default async function catchmentArtwork(job) {
     let finalUrl = firstUrl;
     try {
       const { secure_url } = await uploadImage(String(firstUrl), {
-        folder: 'art-factory/catchment-artwork',
-        publicId: `catchment_${catchmentId}_${stylePrompt.id}_0`
+        folder: 'art-factory/artwork',
+        publicId: `artwork_${photoId}_${stylePrompt.id}_0`
       });
       if (secure_url) finalUrl = secure_url;
     } catch (e) {
@@ -142,24 +208,24 @@ export default async function catchmentArtwork(job) {
       console.warn('[catchmentArtwork] Description generation failed; storing empty description', e);
     }
 
-    // Insert catchment_artwork row, idempotent per catchment/style
+    // Insert into unified artwork table (one per photo/style), idempotent on (photo_id, style_prompt_id)
     try {
-      const ins = await db('catchment_artwork')
+      const ins = await db('artwork')
         .insert({
-          catchment_id: catchmentId,
+          photo_id: photoId,
           style_prompt_id: stylePrompt.id,
           style_name: stylePrompt.text,
           image_url: finalUrl,
           description,
           approved_for_publish: false
         })
-        .onConflict(['catchment_id', 'style_prompt_id'])
+        .onConflict(['photo_id', 'style_prompt_id'])
         .ignore()
         .returning(['id']);
       const insertedId = ins?.[0]?.id || null;
-      try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'inserted', catchmentId, style_prompt_id: stylePrompt.id, id: insertedId })); } catch (_) {}
+      try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'artwork_inserted', photo_id: photoId, style_prompt_id: stylePrompt.id, id: insertedId })); } catch (_) {}
     } catch (e) {
-      console.error('[catchmentArtwork] Insert failed', { catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
+      console.error('[catchmentArtwork] Insert into artwork failed', { catchmentId, photoId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
     }
   }
 }
