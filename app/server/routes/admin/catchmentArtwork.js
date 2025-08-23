@@ -1,8 +1,8 @@
 import express from 'express';
 import db from '../../../db/client.js';
 import { requireApiKey } from '../../middleware/requireApiKey.js';
-import { createMockups } from '../../../services/framemock.js';
-import { deleteImage } from '../../../services/cloudinary.js';
+import { createMockups, getFrameUrlsForOrientation } from '../../../services/framemock.js';
+import { deleteImage, getOrientationByUrl } from '../../../services/cloudinary.js';
 
 const router = express.Router();
 
@@ -138,13 +138,15 @@ router.post('/moderate/catchment-artwork/:id', requireApiKey, async (req, res, n
       console.error('No image_url for catchment_artwork, cannot generate mockups', { id });
     } else {
       try {
-        const { frameMockUrl, frameMockApiKey, frameUrl1, frameUrl2, frameUrl3 } = (await import('../../config/env.js')).env;
+        const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
         const mockupUrls = await createMockups({
           frameUrl1,
           frameUrl2,
           frameUrl3,
           artUrl: art.image_url,
-          orientation: 'auto',
+          orientation,
           enableInnerShadow: true
         });
         await db('catchment_artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });

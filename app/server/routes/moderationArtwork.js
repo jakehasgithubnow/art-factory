@@ -2,8 +2,8 @@ import express from 'express';
 import db from '../../db/client.js';
 import { qPublish } from '../../queue/queues.js';
 import { requireApiKey } from '../middleware/requireApiKey.js';
-import { createMockups } from '../../services/framemock.js';
-import { deleteImage } from '../../services/cloudinary.js';
+import { createMockups, getFrameUrlsForOrientation } from '../../services/framemock.js';
+import { deleteImage, getOrientationByUrl } from '../../services/cloudinary.js';
 
 const router = express.Router();
 
@@ -133,7 +133,7 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
       console.error('No image_url for artwork, cannot generate mockups', { id });
     } else {
       // Check environment variables needed for framemock
-      const { frameMockUrl, frameMockApiKey, frameUrl1, frameUrl2, frameUrl3 } = (await import('../../config/env.js')).env;
+      const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
       if (!frameMockUrl) {
         console.error('Missing env.frameMockUrl');
       }
@@ -143,12 +143,14 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
 
       try {
         console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
         const mockupUrls = await createMockups({
           frameUrl1,
           frameUrl2,
           frameUrl3,
           artUrl: art.image_url,
-          orientation: 'auto',
+          orientation,
           enableInnerShadow: true
         });
         console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });

@@ -132,6 +132,29 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  * @param {{ timeoutMs?: number }} [opts]
  * @returns {Promise<string[]>} Array of mockup image URLs
  */
+export function getFrameUrlsForOrientation(orientation = 'auto') {
+  const o = typeof orientation === 'string' ? orientation.toLowerCase() : 'auto';
+  if (o === 'horizontal') {
+    return {
+      frameUrl1: env.hframeUrl1 || env.frameUrl1,
+      frameUrl2: env.hframeUrl2 || env.frameUrl2,
+      frameUrl3: env.hframeUrl3 || env.frameUrl3,
+    };
+  }
+  if (o === 'vertical') {
+    return {
+      frameUrl1: env.vframeUrl1 || env.frameUrl1,
+      frameUrl2: env.vframeUrl2 || env.frameUrl2,
+      frameUrl3: env.vframeUrl3 || env.frameUrl3,
+    };
+  }
+  return {
+    frameUrl1: env.frameUrl1,
+    frameUrl2: env.frameUrl2,
+    frameUrl3: env.frameUrl3,
+  };
+}
+
 export async function createMockups({
   frameUrl1,
   frameUrl2,
@@ -153,12 +176,14 @@ export async function createMockups({
     headers['Authorization'] = `Bearer ${env.frameMockApiKey}`;
   }
 
+  const normalizedOrientation = (['horizontal','vertical','auto'].includes(String(orientation).toLowerCase()) ? String(orientation).toLowerCase() : 'auto');
+
   const payload = {
     frameUrl1,
     frameUrl2,
     frameUrl3,
     artUrl,
-    orientation: (orientation === 'vertical' ? 'auto' : (orientation || 'auto')),
+    orientation: normalizedOrientation,
     enableInnerShadow: Boolean(enableInnerShadow)
   };
 

@@ -52,9 +52,17 @@ export const env = {
   // Frame-mock service
   frameMockUrl: optional('FRAME_MOCK_URL'),
   frameMockApiKey: optional('FRAME_MOCK_API_KEY'),
+  // Default frame URLs (fallbacks)
   frameUrl1: optional('frameUrl1'),
   frameUrl2: optional('frameUrl2'),
   frameUrl3: optional('frameUrl3'),
+  // Orientation-specific frame URLs (prefer these when set)
+  hframeUrl1: optional('hframeUrl1'),
+  hframeUrl2: optional('hframeUrl2'),
+  hframeUrl3: optional('hframeUrl3'),
+  vframeUrl1: optional('vframeUrl1'),
+  vframeUrl2: optional('vframeUrl2'),
+  vframeUrl3: optional('vframeUrl3'),
 
   // Paint service
   paintEndpoint: optional('PAINT_ENDPOINT'),

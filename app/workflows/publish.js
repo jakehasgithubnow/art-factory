@@ -143,7 +143,8 @@ export default async function publish(job) {
 
   if (!mu || (Array.isArray(mu) && mu.length === 0) || (typeof mu === 'string' && mu.trim() === '')) {
     try {
-      const { createMockups } = await import('../services/framemock.js');
+      const { createMockups, getFrameUrlsForOrientation } = await import('../services/framemock.js');
+      const { getOrientationByUrl } = await import('../services/cloudinary.js');
       const { frameMockUrl, frameMockApiKey } = (await import('../config/env.js')).env;
       if (!frameMockUrl) {
         console.error('publish: Missing env.frameMockUrl');
@@ -153,13 +154,14 @@ export default async function publish(job) {
       }
       if (art.image_url) {
         console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
-        const { frameUrl1, frameUrl2, frameUrl3 } = (await import('../config/env.js')).env;
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
         const generated = await createMockups({
           frameUrl1,
           frameUrl2,
           frameUrl3,
           artUrl: art.image_url,
-          orientation: 'auto',
+          orientation,
           enableInnerShadow: true
         });
         console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });

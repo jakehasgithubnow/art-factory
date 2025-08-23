@@ -213,3 +213,20 @@ export async function deleteImage({
   }
   throw lastErr || new Error('Unknown Cloudinary delete error');
 }
+
+export async function getOrientationByUrl(url, { defaultOrientation = 'auto' } = {}) {
+  try {
+    if (!url) return defaultOrientation;
+    const pid = parsePublicIdFromUrl(url);
+    if (!pid) return defaultOrientation;
+    const meta = await getImageMetadata(pid, { exif: true, context: false });
+    const w = Number(meta?.width);
+    const h = Number(meta?.height);
+    if (Number.isFinite(w) && Number.isFinite(h)) {
+      return w >= h ? 'horizontal' : 'vertical';
+    }
+    return defaultOrientation;
+  } catch {
+    return defaultOrientation;
+  }
+}
