@@ -45,7 +45,8 @@ export default async function publish(job) {
       longitude: 'l.g_lng',
       g_place_id: 'l.g_place_id',
       g_formatted_address: 'l.g_formatted_address',
-      image_source: 'l.image_source'
+      image_source: 'l.image_source',
+      openverse_metadata: 'p.openverse_metadata'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -277,6 +278,46 @@ export default async function publish(job) {
     featured: art.featured || ''
   };
 
+  // Add Openverse copyright metafield into product payload (for n8n or direct REST create)
+  try {
+    const ov = row?.openverse_metadata && typeof row.openverse_metadata === 'object' ? row.openverse_metadata : null;
+    if (row?.image_source === 'openverse' && ov && (ov.license || ov.license_url || ov.creator)) {
+      const code = String(ov.license || '').toLowerCase();
+      const version = ov.license_version || '';
+      const licenseHuman = code === 'cc0'
+        ? `CC0 ${version}`.trim()
+        : `CC ${code.toUpperCase().replace(/-/g, '-')} ${version}`.trim();
+      const assetPage = ov.context || ov.detail_url || ov.url || '';
+      const attribution = [
+        ov.creator ? `Image by ${ov.creator}` : null,
+        licenseHuman || null,
+        ov.license_url || null
+      ].filter(Boolean).join(' • ');
+      const copyright = {
+        source: 'openverse',
+        id: ov.id || null,
+        title: ov.title || null,
+        creator: ov.creator || null,
+        creator_url: ov.creator_url || null,
+        license: licenseHuman || null,
+        license_code: ov.license || null,
+        license_version: ov.license_version || null,
+        license_url: ov.license_url || null,
+        asset_page_url: assetPage || null,
+        provider: ov.provider || null,
+        thumbnail_url: ov.thumbnail || null,
+        attribution,
+        fetched_at: new Date().toISOString()
+      };
+      if (env.createViaN8n) {
+        payload.product.metafields = Array.isArray(payload.product.metafields) ? payload.product.metafields : [];
+        payload.product.metafields.push({ namespace: 'custom', key: 'copyright', type: 'json', value: JSON.stringify(copyright) });
+      }
+    }
+  } catch (e) {
+    console.warn('publish: failed to add copyright metafield to payload', { artworkId, error: e?.message });
+  }
+
   if (env.createViaN8n) {
     try {
       await sendProduct(payload);
@@ -331,6 +372,46 @@ export default async function publish(job) {
     const meta = [
       { namespace: 'location', key: 'details', type: 'json', value: JSON.stringify(details) },
     ];
+
+    // Add Openverse copyright metafield when available
+    try {
+      const ov = row?.openverse_metadata && typeof row.openverse_metadata === 'object' ? row.openverse_metadata : null;
+      if (row?.image_source === 'openverse' && ov && (ov.license || ov.license_url || ov.creator)) {
+        const code = String(ov.license || '').toLowerCase();
+        const version = ov.license_version || '';
+        const licenseHuman = code === 'cc0'
+          ? `CC0 ${version}`.trim()
+          : `CC ${code.toUpperCase().replace(/-/g, '-')} ${version}`.trim();
+        const assetPage = ov.context || ov.detail_url || ov.url || '';
+        const attribution = [
+          ov.creator ? `Image by ${ov.creator}` : null,
+          licenseHuman || null,
+          ov.license_url || null
+        ].filter(Boolean).join(' • ');
+
+        const copyright = {
+          source: 'openverse',
+          id: ov.id || null,
+          title: ov.title || null,
+          creator: ov.creator || null,
+          creator_url: ov.creator_url || null,
+          license: licenseHuman || null,
+          license_code: ov.license || null,
+          license_version: ov.license_version || null,
+          license_url: ov.license_url || null,
+          asset_page_url: assetPage || null,
+          provider: ov.provider || null,
+          thumbnail_url: ov.thumbnail || null,
+          attribution,
+          fetched_at: new Date().toISOString()
+        };
+
+        meta.push({ namespace: 'custom', key: 'copyright', type: 'json', value: JSON.stringify(copyright) });
+      }
+    } catch (e) {
+      console.warn('publish: failed to build copyright metafield', { artworkId, error: e?.message });
+    }
+
     const imgs = Array.isArray(created.images) ? created.images : [];
     if (imgs[1]?.src) meta.push({ namespace: 'images', key: 'image2', type: 'single_line_text_field', value: String(imgs[1].src) });
     if (imgs[2]?.src) meta.push({ namespace: 'images', key: 'image3', type: 'single_line_text_field', value: String(imgs[2].src) });
