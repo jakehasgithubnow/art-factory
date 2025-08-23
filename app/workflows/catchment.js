@@ -179,9 +179,13 @@ try {
 
   // Enqueue catchment-level artwork generation (once per catchment, using catchment lat/lon)
   try {
-    await qCatchmentArtwork.add('catchmentArtwork', { catchmentId }, { jobId: `catchmentArtwork:${catchmentId}` });
+    const jobId = `catchmentArtwork:${catchmentId}`;
+    await qCatchmentArtwork.add('catchmentArtwork', { catchmentId }, { jobId });
+    // Console log for visibility in central logs (job.log writes to BullMQ logs)
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchment', event: 'enqueue_catchment_artwork', catchmentId, jobId })); } catch (_) {}
   } catch (e) {
     if (typeof job.log === 'function') job.log({ event: 'enqueue_catchment_artwork_error', error: e.message });
+    try { console.error(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchment', event: 'enqueue_catchment_artwork_error', catchmentId, error: e?.message })); } catch (_) {}
   }
 
   await qLocation.add('location', { catchmentId, imageSource: row.image_source || imageSource }, { jobId: `location:${catchmentId}` });

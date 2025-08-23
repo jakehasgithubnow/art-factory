@@ -4,6 +4,7 @@ import { env } from './config/env.js';
 import { qCatchment } from './queue/queues.js';
 import { qArtwork } from './queue/queues.js';
 import { qPublish } from './queue/queues.js';
+import { qCatchmentArtwork } from './queue/queues.js';
 import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
 import { randomUUID } from 'crypto';
@@ -1302,12 +1303,18 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
 app.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
   const { stage, id } = req.params;
   switch (stage) {
-    case 'catchment':
-      await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
-      if (typeof req.log === 'function') {
-        req.log({ event: 'requeue', stage: 'catchment', id, jobId: `catchment:${id}` });
-      }
+    case 'catchment': {
+      const jobId = `catchment:${id}`;
+      await qCatchment.add('catchment', { catchmentId: id }, { jobId });
+      if (typeof req.log === 'function') req.log({ event: 'requeue', stage: 'catchment', id, jobId });
       break;
+    }
+    case 'catchmentArtwork': {
+      const jobId = `catchmentArtwork:${id}`;
+      await qCatchmentArtwork.add('catchmentArtwork', { catchmentId: id }, { jobId });
+      if (typeof req.log === 'function') req.log({ event: 'requeue', stage: 'catchmentArtwork', id, jobId });
+      break;
+    }
     default:
       return res.status(400).send('bad stage');
   }

@@ -33,10 +33,12 @@ export default async function catchmentArtwork(job) {
     phrasesBulleted,
     phrasesCsv: phrasesArr.filter(p => typeof p === 'string' && p.trim()).join(', ')
   };
+  try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'ctx_ready', catchmentId, phrases_count: phrasesArr.length })); } catch (_) {}
 
   // Fetch enabled catchment-scoped style prompts
   const { getEnabled } = await import('../db/stylePrompts.js');
   const prompts = await getEnabled('catchment');
+  try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'prompts_loaded', count: Array.isArray(prompts) ? prompts.length : 0 })); } catch (_) {}
   if (!prompts || prompts.length === 0) {
     console.log('[catchmentArtwork] No enabled catchment-scoped style prompts found.');
     return;
@@ -55,6 +57,7 @@ export default async function catchmentArtwork(job) {
     let cleanedPrompt = resolved;
     for (const u of promptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
     cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'prompt_resolved', style_prompt_id: stylePrompt.id, has_refs: promptImageUrls.length > 0, refs_count: promptImageUrls.length, preview: cleanedPrompt.slice(0, 140) })); } catch (_) {}
 
     let imageUrls = [];
     try {
@@ -67,6 +70,25 @@ export default async function catchmentArtwork(job) {
       console.warn('[catchmentArtwork] generateImage failed', { catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
       imageUrls = [];
     }
+
+    // Fallback: reinforce instruction to produce an output image if first attempt returned none
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      try {
+        const reinforced = cleanedPrompt + '\n\nReturn an output image. Do not return text. Provide the final image as an output_image.';
+        const retryUrls = await generateImage({
+          prompt: reinforced,
+          imageUrl: null,
+          additionalImageUrls: promptImageUrls
+        });
+        if (Array.isArray(retryUrls) && retryUrls.length > 0) {
+          imageUrls = retryUrls;
+        }
+      } catch (e2) {
+        console.warn('[catchmentArtwork] generateImage retry failed', { catchmentId, stylePromptId: stylePrompt.id, err: e2 && (e2.message || e2) });
+      }
+    }
+
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'generateImage_result', style_prompt_id: stylePrompt.id, count: Array.isArray(imageUrls) ? imageUrls.length : 0 })); } catch (_) {}
 
     if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
       console.warn('[catchmentArtwork] No image URLs returned for catchment/style', { catchmentId, stylePromptId: stylePrompt.id });
@@ -122,7 +144,7 @@ export default async function catchmentArtwork(job) {
 
     // Insert catchment_artwork row, idempotent per catchment/style
     try {
-      await db('catchment_artwork')
+      const ins = await db('catchment_artwork')
         .insert({
           catchment_id: catchmentId,
           style_prompt_id: stylePrompt.id,
@@ -132,7 +154,10 @@ export default async function catchmentArtwork(job) {
           approved_for_publish: false
         })
         .onConflict(['catchment_id', 'style_prompt_id'])
-        .ignore();
+        .ignore()
+        .returning(['id']);
+      const insertedId = ins?.[0]?.id || null;
+      try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'inserted', catchmentId, style_prompt_id: stylePrompt.id, id: insertedId })); } catch (_) {}
     } catch (e) {
       console.error('[catchmentArtwork] Insert failed', { catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
     }
