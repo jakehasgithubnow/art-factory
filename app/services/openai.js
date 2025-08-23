@@ -180,7 +180,7 @@ export async function chatJson({
   }
 }
 
-export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
+export async function generateImage({ prompt, imageUrl, additionalImageUrls = [], model = "gpt-4o-image" }) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: "generateImage_start", traceId, model });
@@ -214,6 +214,7 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
             role: "user",
             content: [
               ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+              ...(Array.isArray(additionalImageUrls) ? additionalImageUrls.map(u => ({ type: "image_url", image_url: { url: String(u) } })) : []),
               { type: "text", text: prompt }
             ]
           }

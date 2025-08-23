@@ -136,10 +136,29 @@ export default async function artwork(job) {
           }
           // --- DEBUG LOGS END ---
 // Use updated generateImage helper with both prompt and imageUrl
-          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${resolvedPrompt}`);
+          // Parse image URLs embedded in the style prompt and pass them to PiAPI
+          const promptUrlMatches = (resolvedPrompt && resolvedPrompt.match(/https?:\/\/[^\s"'()\\]+/g)) || [];
+          const promptImageUrls = Array.from(new Set(
+            promptUrlMatches.filter(u =>
+              /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u) || /res\.cloudinary\.com/i.test(u)
+            )
+          ));
+          const finalPromptImageUrls = promptImageUrls.filter(u => u !== imageSource);
+
+          // Remove any image URLs from the text prompt to avoid leaking raw links
+          let cleanedPrompt = resolvedPrompt;
+          for (const u of finalPromptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
+          cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+
+          console.log(`[artwork] Calling PiAPI generateImage() with style prompt (cleaned): ${cleanedPrompt}`);
+          if (finalPromptImageUrls.length) {
+            console.log('[artwork] Including prompt image URLs for PiAPI:', finalPromptImageUrls);
+          }
+
           const imageUrls = await generateImage({
-            prompt: resolvedPrompt,
+            prompt: cleanedPrompt,
             imageUrl: imageSource,
+            additionalImageUrls: finalPromptImageUrls,
           });
           let localPromptPaintingUrls = [];
           if (imageUrls && imageUrls.length > 0) {
