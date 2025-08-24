@@ -101,13 +101,21 @@ export default async function artwork(job) {
       throw new Error('PAINT_API_KEY is required for PiAPI endpoint');
     }
 
-    // Fetch enabled style prompts from DB (location-scoped only)
-    const { getEnabled } = await import('../db/stylePrompts.js');
-    const enabledPrompts = await getEnabled('location');
-    if (!enabledPrompts || enabledPrompts.length === 0) {
-      console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
-      return;
-    }
+  // Fetch enabled style prompts: always include 'location'; include 'icon' only for icon photos
+  const { getEnabled } = await import('../db/stylePrompts.js');
+  let enabledPrompts = await getEnabled('location');
+  if (photo.icon === true) {
+    try {
+      const iconPrompts = await getEnabled('icon');
+      if (Array.isArray(iconPrompts) && iconPrompts.length > 0) {
+        enabledPrompts = [...enabledPrompts, ...iconPrompts];
+      }
+    } catch (_) {}
+  }
+  if (!enabledPrompts || enabledPrompts.length === 0) {
+    console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
+    return;
+  }
 
     /// Loop for each style prompt, process independently
     let res; // Declare res in the outer scope of the for-loop

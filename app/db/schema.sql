@@ -225,7 +225,7 @@ create table if not exists style_prompts (
   enabled boolean not null default true,
   updated_at timestamptz default now(),
   created_at timestamptz default now(),
-  constraint style_prompts_scope_check check (scope in ('location','catchment'))
+  constraint style_prompts_scope_check check (scope in ('location','catchment','icon'))
 );
 
 create index if not exists idx_style_prompts_enabled on style_prompts(enabled);

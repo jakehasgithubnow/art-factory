@@ -37,7 +37,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
     const renderScopeSelect = (name, selected) => `
       <label>Scope
         <select name="${name}">
-          ${['location','catchment'].map(s => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`).join('')}
+          ${['location','catchment','icon'].map(s => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
       </label>
     `;
@@ -169,7 +169,7 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
     const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
     const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
-    const normScope = (s) => (String(s || 'location') === 'catchment' ? 'catchment' : 'location');
+    const normScope = (s) => (['location','catchment','icon'].includes(String(s || 'location')) ? String(s || 'location') : 'location');
 
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
@@ -201,7 +201,7 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
     const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
     const modelInput = req.body?.model;
     const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
-    const scope = String(req.body?.scope || 'location') === 'catchment' ? 'catchment' : 'location';
+    const scope = (['location','catchment','icon'].includes(String(req.body?.scope || 'location')) ? String(req.body?.scope || 'location') : 'location');
 
     if (typeof text === 'string' && text.trim().length > 0) {
       await createStylePrompt(text.trim(), enabled, model, scope);
