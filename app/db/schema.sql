@@ -150,6 +150,10 @@ create unique index if not exists photos_cloudinary_unique
 
 create index if not exists idx_photos_created_at on photos(created_at);
 
+-- Add icon flag to mark photos selected as app icon during moderation
+ALTER TABLE photos
+  ADD COLUMN IF NOT EXISTS icon boolean not null default false;
+
 -- ===================== 4. Artwork ========================
 create table if not exists artwork (
   id          uuid primary key default gen_random_uuid(),

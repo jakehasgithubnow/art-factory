@@ -33,6 +33,9 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
   .card:hover{transform:translateY(-1px)}
   .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .icon-token{position:absolute;left:8px;top:8px;width:28px;height:28px;border-radius:8px;background:rgba(11,13,17,.75);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-weight:800;color:#d1d5db;z-index:10;cursor:pointer;user-select:none}
+  .card.icon .icon-token{background:rgba(99,102,241,.2);color:#ffd166;border-color:rgba(99,102,241,.5)}
+  .card.fail .icon-token{opacity:.5}
   .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
   .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
   .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
@@ -86,7 +89,7 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     <div class="kpis">
       <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
       <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
-      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail • Tap star to mark Icon</div>
     </div>
     <button id="nextBtn" class="btn">Next</button>
   </div>
@@ -140,7 +143,8 @@ function cardHTML(p) {
   } catch (_) {}
 
   return \`
-  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+  <div class="card\${p.icon ? ' icon' : ''}" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="icon-token" title="Mark as app icon">★</div>
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
@@ -198,9 +202,22 @@ function setBadge(card) {
 grid.addEventListener('click', (ev) => {
   const card = ev.target.closest('.card');
   if (!card) return;
-  // toggle fail on click
+
+  // If clicking the icon token, toggle icon state only
+  if (ev.target.closest('.icon-token')) {
+    const newIcon = !card.classList.contains('icon');
+    card.classList.toggle('icon', newIcon);
+    updateCounts();
+    return;
+  }
+
+  // Otherwise toggle fail on card click
   const willFail = !card.classList.contains('fail');
   card.classList.toggle('fail', willFail);
+  if (willFail) {
+    // Clear icon when marking as fail to avoid confusion
+    card.classList.remove('icon');
+  }
   setBadge(card);
   updateCounts();
 });
@@ -214,7 +231,8 @@ nextBtn.addEventListener('click', async () => {
     const decisions = current.photos.map(p => {
       const el = document.getElementById('card-' + p.id);
       const kept = el ? !el.classList.contains('fail') : true;
-      return { id: p.id, kept };
+      const icon = el ? el.classList.contains('icon') : false;
+      return { id: p.id, kept, icon };
     });
     await j('/moderate/location/' + current.location.id, {
       method: 'POST',

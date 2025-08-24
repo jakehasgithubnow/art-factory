@@ -98,6 +98,9 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
   .card:hover{transform:translateY(-1px)}
   .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .icon-token{position:absolute;left:8px;top:8px;width:28px;height:28px;border-radius:8px;background:rgba(11,13,17,.75);border:1px solid #202636;display:flex;align-items:center;justify-content:center;font-weight:800;color:#d1d5db;z-index:10;cursor:pointer;user-select:none}
+  .card.icon .icon-token{background:rgba(99,102,241,.2);color:#ffd166;border-color:rgba(99,102,241,.5)}
+  .card.fail .icon-token{opacity:.5}
   .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
   .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
   .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
@@ -142,7 +145,7 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     <div class="kpis">
       <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
       <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
-      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail • Tap star to mark Icon</div>
     </div>
     <button id="nextBtn" class="btn">Next</button>
   </div>
@@ -192,7 +195,8 @@ function cardHTML(p) {
     } catch (_) {}
   }
   return \`
-  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+  <div class="card\${p.icon ? ' icon' : ''}" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="icon-token" title="Mark as app icon">★</div>
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
@@ -243,8 +247,22 @@ function setBadge(card) {
 grid.addEventListener('click', (ev) => {
   const card = ev.target.closest('.card');
   if (!card) return;
+
+  // If clicking the icon token, toggle icon state only
+  if (ev.target.closest('.icon-token')) {
+    const newIcon = !card.classList.contains('icon');
+    card.classList.toggle('icon', newIcon);
+    updateCounts();
+    return;
+  }
+
+  // Otherwise toggle fail on card click
   const willFail = !card.classList.contains('fail');
   card.classList.toggle('fail', willFail);
+  if (willFail) {
+    // Clear icon when marking as fail to avoid confusion
+    card.classList.remove('icon');
+  }
   setBadge(card);
   updateCounts();
 });
@@ -257,7 +275,8 @@ nextBtn.addEventListener('click', async () => {
     const decisions = current.photos.map(p => {
       const el = document.getElementById('card-' + p.id);
       const kept = el ? !el.classList.contains('fail') : true;
-      return { id: p.id, kept };
+      const icon = el ? el.classList.contains('icon') : false;
+      return { id: p.id, kept, icon };
     });
     await j('/moderate/location/' + current.location.id, {
       method: 'POST',
@@ -318,6 +337,7 @@ app.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.ov_id',
         'p.ov_title',
         'p.ov_creator',
@@ -381,6 +401,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.ov_id',
         'p.ov_title',
         'p.ov_creator',
@@ -428,6 +449,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
+  const icon = req.body?.icon === true;
   const t0 = Date.now();
   let uploadedToCloudinary = false;
   let enqueuedArtwork = false;
@@ -436,7 +458,7 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (!photo) return res.status(404).json({ error: 'not_found' });
 
     if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
+      await db('photos').where({ id }).update({ kept: false, processed: true, icon: false });
       if (typeof req.log === 'function') {
         req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
       }
@@ -445,7 +467,7 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
 
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
-    await db('photos').where({ id }).update({ kept: true });
+    await db('photos').where({ id }).update({ kept: true, icon });
 
     if (!photo.cloudinary_id || !photo.secure_url) {
       try {
@@ -489,11 +511,13 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
     }
 
     const keepMap = new Map();
+    const iconMap = new Map();
     const ids = [];
     for (const d of decisions) {
       if (!d || !d.id) continue;
       ids.push(d.id);
       keepMap.set(d.id, Boolean(d.kept));
+      iconMap.set(d.id, d.icon === true);
     }
     if (ids.length === 0) {
       return res.status(400).json({ error: 'no_ids' });
@@ -507,22 +531,28 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
     const validIds = rows.map(r => r.id);
     const approveIds = validIds.filter(id => keepMap.get(id) === true);
     const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+    const iconTrueIds = validIds.filter(id => keepMap.get(id) === true && iconMap.get(id) === true);
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
     let deletedDueToUploadFailure = 0;
 
     if (rejectIds.length > 0) {
-      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true, icon: false });
     }
 
     if (approveIds.length > 0) {
       // Mark approvals as kept
-      await db('photos').whereIn('id', approveIds).update({ kept: true });
+      await db('photos').whereIn('id', approveIds).update({ kept: true, icon: false });
 
       const approveRows = rows.filter(r => approveIds.includes(r.id));
       const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
       const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Set icon=true for requested subset of approved photos
+      if (iconTrueIds.length > 0) {
+        await db('photos').whereIn('id', iconTrueIds).update({ icon: true });
+      }
 
       // Already have assets: mark processed + enqueue
       if (haveAssets.length > 0) {
@@ -563,6 +593,7 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
         uploadedToCloudinary,
         enqueuedArtwork,
         deletedDueToUploadFailure,
+        iconTrue: iconTrueIds.length,
         duration_ms: Date.now() - t0
       });
     }

@@ -20,6 +20,7 @@ router.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.openverse_id',
         'p.title',
         'p.creator',
@@ -89,6 +90,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         // Openverse metadata columns as defined in schema (ov_*)
         'p.ov_id',
         'p.ov_title',
@@ -157,11 +159,13 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Normalize decisions into a map for quick lookup
     const keepMap = new Map();
+    const iconMap = new Map();
     const ids = [];
     for (const d of decisions) {
       if (!d || !d.id) continue;
       ids.push(d.id);
       keepMap.set(d.id, Boolean(d.kept));
+      iconMap.set(d.id, d.icon === true);
     }
     if (ids.length === 0) {
       return res.status(400).json({ error: 'no_ids' });
@@ -176,6 +180,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
     const validIds = rows.map(r => r.id);
     const approveIds = validIds.filter(id => keepMap.get(id) === true);
     const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+    const iconTrueIds = validIds.filter(id => keepMap.get(id) === true && iconMap.get(id) === true);
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
@@ -183,18 +188,23 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Rejects: mark kept=false, processed=true
     if (rejectIds.length > 0) {
-      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true, icon: false });
     }
 
     // Approvals: kept=true, ensure Cloudinary upload present; then processed=true and enqueue artwork
     if (approveIds.length > 0) {
       // Set kept=true upfront for all approvals
-      await db('photos').whereIn('id', approveIds).update({ kept: true });
+      await db('photos').whereIn('id', approveIds).update({ kept: true, icon: false });
 
       // Separate those that already have assets vs need upload
       const approveRows = rows.filter(r => approveIds.includes(r.id));
       const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
       const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Set icon=true for requested subset of approved photos
+      if (iconTrueIds.length > 0) {
+        await db('photos').whereIn('id', iconTrueIds).update({ icon: true });
+      }
 
       // For those with existing assets: mark processed and enqueue
       if (haveAssets.length > 0) {
@@ -235,6 +245,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
         uploadedToCloudinary,
         enqueuedArtwork,
         deletedDueToUploadFailure,
+        iconTrue: iconTrueIds.length,
         duration_ms: Date.now() - t0
       });
     }
@@ -256,6 +267,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
+  const icon = req.body?.icon === true;
   const t0 = Date.now();
   let uploadedToCloudinary = false;
   let enqueuedArtwork = false;
@@ -264,7 +276,7 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (!photo) return res.status(404).json({ error: 'not_found' });
 
     if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
+      await db('photos').where({ id }).update({ kept: false, processed: true, icon: false });
       if (typeof req.log === 'function') {
         req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
       }
@@ -274,7 +286,7 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
     // Approve: mark kept; if Cloudinary upload fails, delete and move on
-    await db('photos').where({ id }).update({ kept: true });
+    await db('photos').where({ id }).update({ kept: true, icon });
 
     let hasAssets = Boolean(photo.cloudinary_id && photo.secure_url);
     if (!hasAssets) {
