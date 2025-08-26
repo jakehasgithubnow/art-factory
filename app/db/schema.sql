@@ -222,15 +222,32 @@ create table if not exists style_prompts (
   text text not null,
   model text,
   scope text not null default 'location',
+  categories text[],
   enabled boolean not null default true,
   updated_at timestamptz default now(),
   created_at timestamptz default now(),
-  constraint style_prompts_scope_check check (scope in ('location','catchment','icon'))
+  constraint style_prompts_scope_check check (scope in ('location','catchment','icon')),
+  constraint style_prompts_categories_allowed check (
+    categories is null or
+    categories <@ array[
+      'mountain_hill',
+      'forest_park',
+      'meadow_field',
+      'river_lake_waterfall',
+      'ocean_beach_coast',
+      'village',
+      'city',
+      'industrial',
+      'castle_church_ruin',
+      'other'
+    ]::text[]
+  )
 );
 
 create index if not exists idx_style_prompts_enabled on style_prompts(enabled);
 create index if not exists idx_style_prompts_scope on style_prompts(scope);
 create index if not exists idx_style_prompts_enabled_scope on style_prompts(enabled, scope);
+create index if not exists idx_style_prompts_categories on style_prompts using gin (categories);
 
 -- ===================== Quality-of-life ===================
 create index if not exists idx_catchments_processed on catchments(processed);

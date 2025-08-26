@@ -16,6 +16,34 @@ function escapeHtml(str) {
 const router = express.Router();
 router.use(express.urlencoded({ extended: true }));
 
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
+
+const renderCategoryCheckboxes = (name, selected = []) => `
+  <div class="group">
+    <label>Categories</label>
+    <div class="row">
+      ${ALLOWED_CATEGORIES.map(c => `
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px">
+          <input type="checkbox" name="${name}" value="${c}" ${Array.isArray(selected) && selected.includes(c) ? 'checked' : ''}/>
+          <span>${c}</span>
+        </label>
+      `).join('')}
+    </div>
+    <div class="muted">Leave none selected to apply to all categories.</div>
+  </div>
+`;
+
 // Admin UI page - system prompts + style prompts
 router.get('/admin/style-prompts-ui', async (req, res, next) => {
   try {
@@ -107,6 +135,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                 <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
                 ${renderModelSelect(`model_${p.id}`, p.model)}<br/>
                 ${renderScopeSelect(`scope_${p.id}`, p.scope)}<br/>
+                ${renderCategoryCheckboxes(`categories_${p.id}[]`, Array.isArray(p.categories) ? p.categories : [])}
                 <label>
                   <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
                 </label>
@@ -122,6 +151,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               <textarea id="new-style-text" name="text" rows="2" cols="80"></textarea><br/>
               ${renderModelSelect('model', null)}<br/>
               ${renderScopeSelect('scope', 'location')}<br/>
+              ${renderCategoryCheckboxes('categories[]', [])}
               <label>
                 <input type="checkbox" name="enabled" checked/> Enabled
               </label>
@@ -178,9 +208,11 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
         const enabled = req.body[`enabled_${id}`] !== undefined;
         const model = normModel(req.body[`model_${id}`]);
         const scope = normScope(req.body[`scope_${id}`]);
+        // categories may be provided as categories_id or categories_id[] depending on parser
+        const rawCats = (req.body[`categories_${id}`] !== undefined) ? req.body[`categories_${id}`] : req.body[`categories_${id}[]`];
 
-        if (text !== undefined || model !== null || scope) {
-          await updateStylePrompt(id, text, model, scope);
+        if (text !== undefined || model !== null || scope || rawCats !== undefined) {
+          await updateStylePrompt(id, text, model, scope, rawCats);
         }
         await toggleStylePrompt(id, enabled);
       }
@@ -202,9 +234,10 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
     const modelInput = req.body?.model;
     const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
     const scope = (['location','catchment','icon'].includes(String(req.body?.scope || 'location')) ? String(req.body?.scope || 'location') : 'location');
+    const rawCats = (req.body?.categories !== undefined) ? req.body.categories : req.body?.['categories[]'];
 
     if (typeof text === 'string' && text.trim().length > 0) {
-      await createStylePrompt(text.trim(), enabled, model, scope);
+      await createStylePrompt(text.trim(), enabled, model, scope, rawCats);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {

@@ -52,12 +52,14 @@ export default async function artwork(job) {
         .first([
           db.raw('l.name as location_name'),
           db.raw('c.name as catchment_name'),
-          db.raw('c.phrases as catchment_phrases')
+          db.raw('c.phrases as catchment_phrases'),
+          db.raw('l.category as location_category')
         ]);
       const phrasesArr = Array.isArray(meta?.catchment_phrases) ? meta.catchment_phrases : [];
       locMeta = {
         locationName: meta?.location_name || '',
         catchmentName: meta?.catchment_name || '',
+        locationCategory: meta?.location_category || '',
         phrases: JSON.stringify(phrasesArr)
       };
     }
@@ -112,8 +114,18 @@ export default async function artwork(job) {
       }
     } catch (_) {}
   }
+
+  // Category filter: only run prompts whose categories include the photo's location category
+  const photoCategory = String(locMeta?.locationCategory || '').trim();
+  enabledPrompts = (enabledPrompts || []).filter(p => {
+    const cats = p?.categories;
+    if (!cats || (Array.isArray(cats) && cats.length === 0)) return true; // unrestricted
+    if (!photoCategory) return false; // no location category -> no restricted prompts
+    return Array.isArray(cats) && cats.includes(photoCategory);
+  });
+
   if (!enabledPrompts || enabledPrompts.length === 0) {
-    console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
+    console.warn('[artwork] No enabled style prompts matched photo location category. Skipping paint generation.');
     return;
   }
 

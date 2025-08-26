@@ -8,6 +8,19 @@ function applyTemplate(str, ctx) {
   return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
 }
 
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
+
 const PLACES_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -20,7 +33,7 @@ const PLACES_SCHEMA = {
         properties: {
           name: { type: 'string' },
           address: { type: 'string' },
-          category: { type: 'string' },
+          category: { type: 'string', enum: ALLOWED_CATEGORIES },
           description: { type: 'string' },
           search_term: { type: 'string' },
         },
@@ -35,10 +48,12 @@ const PLACES_SCHEMA = {
 function sanitizePlace(p) {
   // Ensure strings; trim; default missing optional fields to ''
   const s = (v) => (typeof v === 'string' ? v.trim() : '');
+  let cat = s(p.category).toLowerCase();
+  if (!ALLOWED_CATEGORIES.includes(cat)) cat = 'other';
   const place = {
     name: s(p.name),
     address: s(p.address),
-    category: s(p.category),
+    category: cat,
     description: s(p.description),
     search_term: s(p.search_term || p.name),
   };
