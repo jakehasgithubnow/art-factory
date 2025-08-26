@@ -178,7 +178,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                       <span class="badge">system</span>
                     </div>
                     <div class="row">
-                      ${renderModelSelect(\`model_\${p.key}\`, p.model, true)}
+                      ${renderModelSelect('model_' + p.key, p.model, true)}
                     </div>
                   </div>
                   <div class="field">
@@ -212,11 +212,11 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                   </div>
 
                   <div class="row" style="margin-bottom:8px">
-                    ${renderModelSelect(\`model_\${p.id}\`, p.model)}
-                    ${renderScopeSelect(\`scope_\${p.id}\`, p.scope)}
+                    ${renderModelSelect('model_' + p.id, p.model)}
+                    ${renderScopeSelect('scope_' + p.id, p.scope)}
                   </div>
 
-                  ${renderCategoryCheckboxes(\`categories_\${p.id}[]\`, Array.isArray(p.categories) ? p.categories : [])}
+                  ${renderCategoryCheckboxes('categories_' + p.id + '[]', Array.isArray(p.categories) ? p.categories : [])}
 
                   <div class="field">
                     <label class="label" for="style-${p.id}">Prompt Text</label>
@@ -281,7 +281,7 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
     for (const p of currentList) {
       const key = p.key;
       const text = req.body[key] ?? '';
-      const model = normModel(req.body[\`model_\${key}\`]);
+      const model = normModel(req.body['model_' + key]);
       const enabled = enabledByKey.hasOwnProperty(key) ? enabledByKey[key] : true;
       await updateSystemPrompt(key, text || "", enabled, model);
     }
@@ -302,12 +302,12 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
         const id = key.split('_')[1];
-        const text = req.body[\`text_\${id}\`];
-        const enabled = req.body[\`enabled_\${id}\`] !== undefined;
-        const model = normModel(req.body[\`model_\${id}\`]);
-        const scope = normScope(req.body[\`scope_\${id}\`]);
+        const text = req.body['text_' + id];
+        const enabled = req.body['enabled_' + id] !== undefined;
+        const model = normModel(req.body['model_' + id]);
+        const scope = normScope(req.body['scope_' + id]);
         // categories may be provided as categories_id or categories_id[] depending on parser
-        const rawCats = (req.body[\`categories_\${id}\`] !== undefined) ? req.body[\`categories_\${id}\`] : req.body[\`categories_\${id}[]\`];
+        const rawCats = (req.body['categories_' + id] !== undefined) ? req.body['categories_' + id] : req.body['categories_' + id + '[]'];
 
         if (text !== undefined || model !== null || scope || rawCats !== undefined) {
           await updateStylePrompt(id, text, model, scope, rawCats);
