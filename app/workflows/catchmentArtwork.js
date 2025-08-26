@@ -2,6 +2,7 @@ import db from '../db/client.js';
 import fetch from 'node-fetch';
 import { chat, chatJson, generateImage } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
+import { generateImageWithGemini } from '../services/openrouter.js';
 
 function applyTemplate(str, ctx) {
   if (typeof str !== 'string') return str;
@@ -110,7 +111,7 @@ export default async function catchmentArtwork(job) {
     return;
   }
 
-  // For each style prompt, generate image(s) with PiAPI/OpenAI (no base image; use text + coords)
+  // For each style prompt, generate image(s) via provider (Gemini or PiAPI). No base image; use text + refs.
   for (const stylePrompt of prompts) {
     // Resolve and clean prompt; allow image URLs embedded in prompt text as references
     const resolved = applyTemplate(stylePrompt.text, ctx);
@@ -125,15 +126,24 @@ export default async function catchmentArtwork(job) {
     cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
     try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'prompt_resolved', style_prompt_id: stylePrompt.id, has_refs: promptImageUrls.length > 0, refs_count: promptImageUrls.length, preview: cleanedPrompt.slice(0, 140) })); } catch (_) {}
 
+    const provider = String(stylePrompt?.provider || 'piapi').toLowerCase();
     let imageUrls = [];
     try {
-      imageUrls = await generateImage({
-        prompt: cleanedPrompt,
-        imageUrl: null,
-        additionalImageUrls: promptImageUrls
-      });
+      if (provider === 'gemini') {
+        imageUrls = await generateImageWithGemini({
+          prompt: cleanedPrompt,
+          imageUrl: null,
+          additionalImageUrls: promptImageUrls
+        });
+      } else {
+        imageUrls = await generateImage({
+          prompt: cleanedPrompt,
+          imageUrl: null,
+          additionalImageUrls: promptImageUrls
+        });
+      }
     } catch (e) {
-      console.warn('[catchmentArtwork] generateImage failed', { catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
+      console.warn('[catchmentArtwork] generateImage provider call failed', { provider, catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
       imageUrls = [];
     }
 

@@ -89,6 +89,17 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
       </div>
     `;
 
+    const renderProviderSelect = (name, selected) => `
+      <div class="field">
+        <label class="label">Provider</label>
+        <select class="select" name="${name}">
+          ${['piapi','gemini']
+            .map((p) => `<option value="${p}" ${String(selected || 'piapi') === p ? 'selected' : ''}>${p}</option>`)
+            .join('')}
+        </select>
+      </div>
+    `;
+
     res.set('Cache-Control', 'no-store');
 
     res.send(`
@@ -214,6 +225,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                   <div class="row" style="margin-bottom:8px">
                     ${renderModelSelect('model_' + p.id, p.model)}
                     ${renderScopeSelect('scope_' + p.id, p.scope)}
+                    ${renderProviderSelect('provider_' + p.id, p.provider)}
                   </div>
 
                   ${renderCategoryCheckboxes('categories_' + p.id + '[]', Array.isArray(p.categories) ? p.categories : [])}
@@ -244,6 +256,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                 <div class="row" style="margin-bottom:8px">
                   ${renderModelSelect('model', null)}
                   ${renderScopeSelect('scope', 'location')}
+                  ${renderProviderSelect('provider', 'piapi')}
                 </div>
 
                 ${renderCategoryCheckboxes('categories[]', [])}
@@ -308,9 +321,10 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
         const scope = normScope(req.body['scope_' + id]);
         // categories may be provided as categories_id or categories_id[] depending on parser
         const rawCats = (req.body['categories_' + id] !== undefined) ? req.body['categories_' + id] : req.body['categories_' + id + '[]'];
+        const provider = req.body['provider_' + id];
 
-        if (text !== undefined || model !== null || scope || rawCats !== undefined) {
-          await updateStylePrompt(id, text, model, scope, rawCats);
+        if (text !== undefined || model !== null || scope || rawCats !== undefined || provider !== undefined) {
+          await updateStylePrompt(id, text, model, scope, rawCats, provider);
         }
         await toggleStylePrompt(id, enabled);
       }
@@ -333,9 +347,10 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
     const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
     const scope = (['location','catchment','icon'].includes(String(req.body?.scope || 'location')) ? String(req.body?.scope || 'location') : 'location');
     const rawCats = (req.body?.categories !== undefined) ? req.body.categories : req.body?.['categories[]'];
+    const provider = req.body?.provider;
 
     if (typeof text === 'string' && text.trim().length > 0) {
-      await createStylePrompt(text.trim(), enabled, model, scope, rawCats);
+      await createStylePrompt(text.trim(), enabled, model, scope, rawCats, provider);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {

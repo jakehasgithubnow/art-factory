@@ -58,6 +58,13 @@ app/
       20250817_migrate_prompts_to_systemprompts.sql
       20250817_seed_catchment_prompts.sql
       20250820_multi_style_artwork.sql
+      20250821_add_artwork_description_user.sql
+      20250822_add_model_to_prompts.sql
+      20250823_add_phrases_to_catchments.sql
+      20250823_add_style_prompt_scope.sql
+      20250823_create_catchment_artwork.sql
+      20250824_add_icon_scope_to_style_prompts.sql
+      20250826_add_categories_to_style_prompts.sql
     client.js
     schema.sql
     stylePrompts.js
@@ -79,6 +86,7 @@ app/
       requireApiKey.js
     routes/
       admin/
+        catchmentArtwork.js
         stylePrompts.js
         stylePromptsUI.js
         systemPrompts.js
@@ -88,6 +96,7 @@ app/
       health.js
       moderationArtwork.js
       moderationArtworkUI.js
+      moderationCatchmentArtworkUI.js
       moderationPhotos.js
       moderationUI.js
     utils/
@@ -107,6 +116,7 @@ app/
   workflows/
     artwork.js
     catchment.js
+    catchmentArtwork.js
     locations.js
     photos.js
     publish.js
@@ -181,6 +191,9 @@ export const env = {
   openverseUserAgent: optional('OPENVERSE_USER_AGENT'),
   appContact: optional('APP_CONTACT'),
 
+  // Feature flags
+  openverseAiReview: bool('OPENVERSE_AI_REVIEW', true),
+
   // Cloudinary
   cloudName: optional('CLOUDINARY_CLOUD_NAME'),
   cloudKey: optional('CLOUDINARY_API_KEY'),
@@ -189,9 +202,17 @@ export const env = {
   // Frame-mock service
   frameMockUrl: optional('FRAME_MOCK_URL'),
   frameMockApiKey: optional('FRAME_MOCK_API_KEY'),
+  // Default frame URLs (fallbacks)
   frameUrl1: optional('frameUrl1'),
   frameUrl2: optional('frameUrl2'),
   frameUrl3: optional('frameUrl3'),
+  // Orientation-specific frame URLs (prefer these when set)
+  hframeUrl1: optional('hframeUrl1'),
+  hframeUrl2: optional('hframeUrl2'),
+  hframeUrl3: optional('hframeUrl3'),
+  vframeUrl1: optional('vframeUrl1'),
+  vframeUrl2: optional('vframeUrl2'),
+  vframeUrl3: optional('vframeUrl3'),
 
   // Paint service
   paintEndpoint: optional('PAINT_ENDPOINT'),
@@ -302,6 +323,176 @@ CREATE UNIQUE INDEX IF NOT EXISTS artwork_unique_per_photo_style
   ON artwork(photo_id, style_prompt_id);
 
 ================
+File: app/db/migrations/20250821_add_artwork_description_user.sql
+================
+-- Migration: add artwork_description_user system prompt
+INSERT INTO system_prompts (key, text, enabled, updated_at)
+VALUES
+  ('artwork_description_user', 'Describe the colours, medium and vibe of the painting at {url}', true, now())
+ON CONFLICT (key) DO NOTHING;
+
+================
+File: app/db/migrations/20250822_add_model_to_prompts.sql
+================
+-- Add 'model' column to prompts tables so each prompt can specify an OpenAI model.
+-- Idempotent: uses IF NOT EXISTS and safe updates.
+
+BEGIN;
+
+ALTER TABLE IF EXISTS system_prompts
+  ADD COLUMN IF NOT EXISTS model text;
+
+ALTER TABLE IF EXISTS style_prompts
+  ADD COLUMN IF NOT EXISTS model text;
+
+COMMIT;
+
+================
+File: app/db/migrations/20250823_add_phrases_to_catchments.sql
+================
+-- Add phrases column to catchments to store city/catchment phrases array
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS phrases jsonb DEFAULT '[]'::jsonb;
+
+================
+File: app/db/migrations/20250823_add_style_prompt_scope.sql
+================
+-- 2025-08-23: Add 'scope' to style_prompts to support catchment-level prompts
+
+BEGIN;
+
+-- 1) Add scope column if missing
+ALTER TABLE IF EXISTS style_prompts
+  ADD COLUMN IF NOT EXISTS scope text;
+
+-- 2) Set default and backfill existing rows to 'location'
+ALTER TABLE IF EXISTS style_prompts
+  ALTER COLUMN scope SET DEFAULT 'location';
+
+UPDATE style_prompts
+SET scope = 'location'
+WHERE scope IS NULL;
+
+-- 3) Make NOT NULL
+ALTER TABLE IF EXISTS style_prompts
+  ALTER COLUMN scope SET NOT NULL;
+
+-- 4) Add CHECK constraint for allowed scopes (location | catchment)
+DO $$
+BEGIN
+  ALTER TABLE style_prompts
+    ADD CONSTRAINT style_prompts_scope_check CHECK (scope IN ('location','catchment'));
+EXCEPTION
+  WHEN duplicate_object THEN
+    -- constraint already exists, ignore
+    NULL;
+END $$;
+
+-- 5) Helpful indexes
+CREATE INDEX IF NOT EXISTS idx_style_prompts_scope ON style_prompts(scope);
+CREATE INDEX IF NOT EXISTS idx_style_prompts_enabled_scope ON style_prompts(enabled, scope);
+
+COMMIT;
+
+================
+File: app/db/migrations/20250823_create_catchment_artwork.sql
+================
+-- 2025-08-23: Create catchment_artwork table for catchment-level style prompts
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS catchment_artwork (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  catchment_id     uuid NOT NULL REFERENCES catchments(id) ON DELETE CASCADE,
+  style_prompt_id  integer REFERENCES style_prompts(id),
+  style_name       text,
+  image_url        text NOT NULL,
+  description      text,
+  mockup_urls      jsonb DEFAULT '[]'::jsonb,
+  shopify_id       text,
+  approved_for_publish boolean DEFAULT false,
+  moderated_at     timestamptz,
+  published        boolean NOT NULL DEFAULT false,
+  created_at       timestamptz DEFAULT now()
+);
+
+-- One artwork per catchment per style
+CREATE UNIQUE INDEX IF NOT EXISTS catchment_artwork_unique_per_catchment_style
+  ON catchment_artwork(catchment_id, style_prompt_id);
+
+CREATE INDEX IF NOT EXISTS idx_catchment_artwork_catchment ON catchment_artwork(catchment_id);
+CREATE INDEX IF NOT EXISTS idx_catchment_artwork_published ON catchment_artwork(published);
+
+COMMIT;
+
+================
+File: app/db/migrations/20250824_add_icon_scope_to_style_prompts.sql
+================
+-- 2025-08-24: Expand style_prompts.scope to include 'icon'
+
+BEGIN;
+
+-- Replace CHECK constraint to allow the new 'icon' scope
+ALTER TABLE IF EXISTS style_prompts
+  DROP CONSTRAINT IF EXISTS style_prompts_scope_check;
+
+ALTER TABLE IF EXISTS style_prompts
+  ADD CONSTRAINT style_prompts_scope_check
+  CHECK (scope IN ('location','catchment','icon'));
+
+-- Helpful indexes (idempotent)
+CREATE INDEX IF NOT EXISTS idx_style_prompts_scope ON style_prompts(scope);
+CREATE INDEX IF NOT EXISTS idx_style_prompts_enabled_scope ON style_prompts(enabled, scope);
+
+COMMIT;
+
+================
+File: app/db/migrations/20250826_add_categories_to_style_prompts.sql
+================
+-- 2025-08-26: Add categories to style_prompts for location/icon category filtering
+
+BEGIN;
+
+-- 1) Add categories column (nullable means no restriction)
+ALTER TABLE IF EXISTS style_prompts
+  ADD COLUMN IF NOT EXISTS categories text[];
+
+-- 2) Ensure only allowed category values are stored (or NULL)
+DO $$
+BEGIN
+  ALTER TABLE style_prompts
+    DROP CONSTRAINT IF EXISTS style_prompts_categories_allowed;
+  ALTER TABLE style_prompts
+    ADD CONSTRAINT style_prompts_categories_allowed
+    CHECK (
+      categories IS NULL OR
+      categories <@ ARRAY[
+        'mountain_hill',
+        'forest_park',
+        'meadow_field',
+        'river_lake_waterfall',
+        'ocean_beach_coast',
+        'village',
+        'city',
+        'industrial',
+        'castle_church_ruin',
+        'other'
+      ]::text[]
+    );
+EXCEPTION
+  WHEN undefined_table THEN
+    -- Table might not exist in some environments; ignore here
+    NULL;
+END $$;
+
+-- 3) Helpful index for membership queries
+CREATE INDEX IF NOT EXISTS idx_style_prompts_categories
+  ON style_prompts
+  USING GIN (categories);
+
+COMMIT;
+
+================
 File: app/db/client.js
 ================
 import knexFn from 'knex';
@@ -337,6 +528,7 @@ CREATE TABLE IF NOT EXISTS system_prompts (
   id SERIAL PRIMARY KEY,
   key TEXT UNIQUE NOT NULL,
   text TEXT NOT NULL,
+  model TEXT,
   enabled BOOLEAN DEFAULT TRUE,
   updated_at TIMESTAMP DEFAULT now()
 );
@@ -345,7 +537,8 @@ CREATE TABLE IF NOT EXISTS system_prompts (
 INSERT INTO system_prompts (key, text) VALUES
   ('location_intro_system', 'You are a concise travel copywriter. Reply with <=50 words.'),
   ('artwork_description_system', 'Describe a painting in 35 words.'),
-  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.')
+  ('location_places_system', 'Suggest 10 interesting places to paint with short descriptions.'),
+  ('artwork_description_user', 'Describe the colours, medium and vibe of the painting at {url}')
 ON CONFLICT(key) DO NOTHING;
 
 -- Guardrails for geo ranges (no-op if already present)
@@ -368,6 +561,14 @@ create index if not exists idx_catchments_created_at on catchments(created_at);
 -- Backfill column for image source on existing catchments
 ALTER TABLE catchments
   ADD COLUMN IF NOT EXISTS image_source text;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_top_n integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_per_page integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_max_pages integer;
+ALTER TABLE catchments
+  ADD COLUMN IF NOT EXISTS openverse_params jsonb DEFAULT '{}'::jsonb;
 
 -- ===================== 2. Locations ======================
 create table if not exists locations (
@@ -460,6 +661,10 @@ create unique index if not exists photos_cloudinary_unique
 
 create index if not exists idx_photos_created_at on photos(created_at);
 
+-- Add icon flag to mark photos selected as app icon during moderation
+ALTER TABLE photos
+  ADD COLUMN IF NOT EXISTS icon boolean not null default false;
+
 -- ===================== 4. Artwork ========================
 create table if not exists artwork (
   id          uuid primary key default gen_random_uuid(),
@@ -488,6 +693,29 @@ create unique index if not exists artwork_shopify_unique
 
 create index if not exists idx_artwork_created_at on artwork(created_at);
 
+-- ===================== 4b. Catchment Artwork ========================
+create table if not exists catchment_artwork (
+  id               uuid primary key default gen_random_uuid(),
+  catchment_id     uuid not null references catchments(id) on delete cascade,
+  style_prompt_id  integer references style_prompts(id),
+  style_name       text,
+  image_url        text not null,
+  description      text,
+  mockup_urls      jsonb default '[]'::jsonb,
+  shopify_id       text,
+  approved_for_publish boolean default false,
+  moderated_at     timestamptz,
+  published        boolean not null default false,
+  created_at       timestamptz default now()
+);
+
+-- One artwork per catchment per style
+create unique index if not exists catchment_artwork_unique_per_catchment_style
+  on catchment_artwork(catchment_id, style_prompt_id);
+
+create index if not exists idx_catchment_artwork_catchment on catchment_artwork(catchment_id);
+create index if not exists idx_catchment_artwork_published on catchment_artwork(published);
+
 -- ===================== Orchestration =====================
 -- We are using code-driven queue chaining (Option A). Remove LISTEN/NOTIFY triggers.
 -- Drop old triggers/functions if they exist so schemas remain clean.
@@ -503,12 +731,34 @@ drop function if exists notify_event() cascade;
 create table if not exists style_prompts (
   id serial primary key,
   text text not null,
+  model text,
+  scope text not null default 'location',
+  categories text[],
   enabled boolean not null default true,
   updated_at timestamptz default now(),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  constraint style_prompts_scope_check check (scope in ('location','catchment','icon')),
+  constraint style_prompts_categories_allowed check (
+    categories is null or
+    categories <@ array[
+      'mountain_hill',
+      'forest_park',
+      'meadow_field',
+      'river_lake_waterfall',
+      'ocean_beach_coast',
+      'village',
+      'city',
+      'industrial',
+      'castle_church_ruin',
+      'other'
+    ]::text[]
+  )
 );
 
 create index if not exists idx_style_prompts_enabled on style_prompts(enabled);
+create index if not exists idx_style_prompts_scope on style_prompts(scope);
+create index if not exists idx_style_prompts_enabled_scope on style_prompts(enabled, scope);
+create index if not exists idx_style_prompts_categories on style_prompts using gin (categories);
 
 -- ===================== Quality-of-life ===================
 create index if not exists idx_catchments_processed on catchments(processed);
@@ -521,25 +771,91 @@ File: app/db/stylePrompts.js
 ================
 import db from './client.js';
 
-export async function getEnabled() {
-  return db('style_prompts').where({ enabled: true }).orderBy('id', 'asc');
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
+
+function normalizeCategories(input) {
+  if (input == null || input === '') return null;
+  let arr = input;
+  if (typeof input === 'string') {
+    arr = input.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (!Array.isArray(arr)) return null;
+  const set = new Set();
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const val = v.trim();
+    if (!val) continue;
+    if (ALLOWED_CATEGORIES.includes(val)) set.add(val);
+  }
+  if (set.size === 0) return null;
+  return Array.from(set);
+}
+
+export async function getEnabled(scope = null) {
+  const q = db('style_prompts').where({ enabled: true });
+  if (scope && typeof scope === 'string') q.andWhere({ scope: scope.trim() });
+  return q.orderBy('id', 'asc');
 }
 
 export async function getAll() {
   return db('style_prompts').orderBy('id', 'asc');
 }
 
-export async function createPrompt(text, enabled = true) {
+export async function createPrompt(text, enabled = true, model = null, scope = 'location', categories = null) {
+  const insertData = {
+    text,
+    enabled,
+    scope: (typeof scope === 'string' && scope.trim()) ? scope.trim() : 'location'
+  };
+  if (model != null && typeof model === 'string' && model.trim()) {
+    insertData.model = model.trim();
+  }
+  const normCats = normalizeCategories(categories);
+  if (normCats) insertData.categories = normCats;
+  else insertData.categories = null;
+
   const [prompt] = await db('style_prompts')
-    .insert({ text, enabled })
+    .insert(insertData)
     .returning('*');
   return prompt;
 }
 
-export async function updatePrompt(id, text) {
+export async function updatePrompt(id, text, model, scope, categories) {
+  const patch = { updated_at: db.fn.now() };
+  if (typeof text === 'string') patch.text = text;
+  if (model !== undefined) {
+    if (model == null || model === '') {
+      patch.model = null;
+    } else if (typeof model === 'string') {
+      patch.model = model.trim();
+    }
+  }
+  if (scope !== undefined) {
+    if (scope == null || scope === '') {
+      // default back to 'location' if explicitly nulled
+      patch.scope = 'location';
+    } else if (typeof scope === 'string') {
+      patch.scope = scope.trim();
+    }
+  }
+  if (categories !== undefined) {
+    const normCats = normalizeCategories(categories);
+    patch.categories = normCats; // null clears restriction
+  }
   const [prompt] = await db('style_prompts')
     .where({ id })
-    .update({ text, updated_at: db.fn.now() })
+    .update(patch)
     .returning('*');
   return prompt;
 }
@@ -574,16 +890,27 @@ export async function getByKey(key) {
   return db('system_prompts').where({ key }).first();
 }
 
-export async function updatePrompt(key, text, enabled = true) {
+export async function updatePrompt(key, text, enabled = true, model) {
+  const patch = { updated_at: db.fn.now() };
+  if (typeof text === 'string') patch.text = text;
+  if (typeof enabled === 'boolean') patch.enabled = enabled;
+  if (model !== undefined) {
+    if (model == null || model === '') {
+      patch.model = null;
+    } else if (typeof model === 'string') {
+      patch.model = model.trim();
+    }
+  }
+
   const existing = await db('system_prompts').where({ key }).first();
   if (existing) {
     await db('system_prompts')
       .where({ key })
-      .update({ text, enabled, updated_at: db.fn.now() });
+      .update(patch);
     return db('system_prompts').where({ key }).first();
   } else {
     await db('system_prompts')
-      .insert({ key, text, enabled, updated_at: db.fn.now() });
+      .insert({ key, ...patch });
     return db('system_prompts').where({ key }).first();
   }
 }
@@ -842,6 +1169,7 @@ export const qLocation  = createQueue('location');
 export const qPhoto     = createQueue('photo');
 export const qArtwork   = createQueue('artwork');
 export const qPublish   = createQueue('publish');
+export const qCatchmentArtwork = createQueue('catchmentArtwork');
 
 // Optionally export the shared connection for workers
 export { connection };
@@ -857,6 +1185,7 @@ import locations from '../workflows/locations.js';
 import photos from '../workflows/photos.js';
 import artwork from '../workflows/artwork.js';
 import publish from '../workflows/publish.js';
+import catchmentArtwork from '../workflows/catchmentArtwork.js';
 
 // Use same prefix as queues to ensure workers consume the correct streams
 const PREFIX = process.env.QUEUE_PREFIX || 'art-factory';
@@ -868,6 +1197,7 @@ const CONCURRENCY = {
   photo:     parseInt(process.env.CONCURRENCY_PHOTO     || '4', 10),
   artwork:   parseInt(process.env.CONCURRENCY_ARTWORK   || '2', 10),
   publish:   parseInt(process.env.CONCURRENCY_PUBLISH   || '2', 10),
+  catchmentArtwork: parseInt(process.env.CONCURRENCY_CATCHMENT_ARTWORK || '2', 10),
 };
 
 function makeWorker(name, processor, concurrency) {
@@ -906,6 +1236,7 @@ makeWorker('location',  locations, CONCURRENCY.location);
 makeWorker('photo',     photos,    CONCURRENCY.photo);
 makeWorker('artwork',   artwork,   CONCURRENCY.artwork);
 makeWorker('publish',   publish,   CONCURRENCY.publish);
+makeWorker('catchmentArtwork', catchmentArtwork, CONCURRENCY.catchmentArtwork);
 
 ================
 File: app/scripts/migrate.js
@@ -1077,12 +1408,222 @@ export function requireApiKey(req, res, next) {
 }
 
 ================
+File: app/server/routes/admin/catchmentArtwork.js
+================
+import express from 'express';
+import db from '../../../db/client.js';
+import { requireApiKey } from '../../middleware/requireApiKey.js';
+import { createMockups, getFrameUrlsForOrientation } from '../../../services/framemock.js';
+import { deleteImage, getOrientationByUrl } from '../../../services/cloudinary.js';
+
+const router = express.Router();
+
+/**
+ * List catchment_artwork rows for moderation.
+ * Query:
+ *  - catchmentId (required)
+ *  - status=pending|approved|rejected (default: pending)
+ *
+ * Response shape mirrors /admin/artworks where possible:
+ *  - id, image_url, description, mockup_urls, published, approved_for_publish, moderated_at
+ *  - location_name (we map to catchment name)
+ *  - photo_thumbnail_url, photo_detail_url (not applicable; omitted)
+ */
+router.get('/admin/catchment-artworks', async (req, res, next) => {
+  const t0 = Date.now();
+  try {
+    const { catchmentId, status = 'pending' } = req.query;
+    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
+
+    const rows = await db('catchment_artwork as a')
+      .join('catchments as c', 'c.id', 'a.catchment_id')
+      .select(
+        'a.id',
+        'a.image_url',
+        'a.description',
+        'a.mockup_urls',
+        'a.published',
+        'a.approved_for_publish',
+        'a.moderated_at',
+        db.raw('c.name as location_name')
+      )
+      .where('a.catchment_id', catchmentId)
+      .modify(qb => {
+        if (status === 'pending') {
+          qb.where('a.published', false)
+            .andWhere(inner => {
+              inner.where('a.approved_for_publish', false).orWhereNull('a.approved_for_publish');
+            });
+        } else if (status === 'approved') {
+          qb.where('a.approved_for_publish', true);
+        } else if (status === 'rejected') {
+          qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
+        }
+      })
+      .orderBy('a.id', 'desc')
+      .limit(200);
+
+    if (typeof req.log === 'function') {
+      req.log({ event: 'admin_catchment_artworks', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
+    }
+    res.json({ artworks: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Moderate catchment_artwork (approve => generate mockups, reject => delete assets and row)
+ * POST /moderate/catchment-artwork/:id { action: 'approve' | 'reject' }
+ */
+router.post('/moderate/catchment-artwork/:id', requireApiKey, async (req, res, next) => {
+  const { id } = req.params;
+  const rawAction = (req.body && req.body.action) || '';
+  const action = String(rawAction).toLowerCase() === 'fail' ? 'reject' : String(rawAction).toLowerCase();
+  const t0 = Date.now();
+  if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork_request', artworkId: id, action: rawAction, normalizedAction: action, hasApiKey: Boolean(req.headers['x-api-key'] || req.headers['x-ingest-key']) });
+
+  try {
+    if (!['approve','reject'].includes(String(action))) {
+      return res.status(400).json({ error: 'bad_action' });
+    }
+
+    if (action === 'reject') {
+      const art = await db('catchment_artwork').where({ id }).first();
+
+      if (typeof req.log === 'function') {
+        let mockCount = 0;
+        try {
+          if (Array.isArray(art?.mockup_urls)) mockCount = art.mockup_urls.length;
+          else if (typeof art?.mockup_urls === 'string') mockCount = (JSON.parse(art.mockup_urls) || []).length;
+        } catch {}
+        req.log({
+          event: 'moderate_catchment_artwork.reject.loaded',
+          artworkId: id,
+          hasArt: Boolean(art),
+          hasImageUrl: Boolean(art?.image_url),
+          style_prompt_id: art?.style_prompt_id,
+          mockup_count: mockCount
+        });
+      }
+
+      try {
+        if (art?.image_url) {
+          if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork.reject.delete_image_by_url', artworkId: id, url: art.image_url });
+          await deleteImage({ url: art.image_url });
+        } else if (art?.catchment_id && art?.style_prompt_id != null) {
+          const fallbackPublicId = `art-factory/catchment-artwork/catchment_${art.catchment_id}_${art.style_prompt_id}_0`;
+          if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork.reject.delete_image_by_public_id', artworkId: id, public_id: fallbackPublicId });
+          await deleteImage({ publicId: fallbackPublicId });
+        } else {
+          console.warn('moderate_catchment_artwork.reject: no_image_reference', { artworkId: id });
+        }
+      } catch (err) {
+        console.warn('moderate_catchment_artwork.reject: cloudinary_delete_failed', { artworkId: id, error: err && err.message });
+      }
+
+      try {
+        const mocks = Array.isArray(art?.mockup_urls)
+          ? art.mockup_urls
+          : (typeof art?.mockup_urls === 'string' ? (JSON.parse(art.mockup_urls) || []) : []);
+        for (const u of (Array.isArray(mocks) ? mocks : [])) {
+          try {
+            if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork.reject.mockup_delete', artworkId: id, url: u });
+            await deleteImage({ url: u });
+          } catch (e) {
+            console.warn('moderate_catchment_artwork.reject: mockup_delete_failed', { artworkId: id, error: e && e.message, url: u });
+          }
+        }
+      } catch (_) {}
+
+      await db('catchment_artwork').where({ id }).del();
+
+      if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork', artworkId: id, action: 'reject_delete', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'deleted' });
+    }
+
+    // approve
+    await db('catchment_artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
+
+    const art = await db('catchment_artwork').where({ id }).first();
+    if (!art || !art.image_url) {
+      console.error('No image_url for catchment_artwork, cannot generate mockups', { id });
+    } else {
+      try {
+        const { frameMockUrl, frameMockApiKey } = (await import('../../config/env.js')).env;
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
+        const mockupUrls = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation,
+          enableInnerShadow: true
+        });
+        await db('catchment_artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_catchment_mockups', artworkId: id, mockupsCount: mockupUrls.length });
+        }
+      } catch (err) {
+        if (typeof req.log === 'function') {
+          req.log({ event: 'generate_catchment_mockups_failed', artworkId: id, error: err.message });
+        }
+        console.error('generate_catchment_mockups_failed', { artworkId: id, error: err });
+      }
+    }
+
+    if (typeof req.log === 'function') req.log({ event: 'moderate_catchment_artwork', artworkId: id, action: 'approve', duration_ms: Date.now() - t0 });
+    res.json({ ok: true, status: 'approved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+
+================
 File: app/server/routes/admin/stylePrompts.js
 ================
 import express from 'express';
 import * as stylePrompts from '../../../db/stylePrompts.js';
 
 const router = express.Router({ mergeParams: true });
+
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
+
+function normalizeCategories(input) {
+  if (input == null || input === '') return null;
+  let arr = input;
+  if (typeof input === 'string') {
+    arr = input.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (!Array.isArray(arr)) {
+    // Express urlencoded parser may give a single value when one checkbox is selected
+    if (typeof input === 'string') arr = [input.trim()];
+    else return null;
+  }
+  const set = new Set();
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const val = v.trim();
+    if (!val) continue;
+    if (ALLOWED_CATEGORIES.includes(val)) set.add(val);
+  }
+  if (set.size === 0) return null;
+  return Array.from(set);
+}
 
 // Get all prompts
 router.get('/', async (req, res) => {
@@ -1098,11 +1639,13 @@ router.get('/', async (req, res) => {
 // Create a prompt
 router.post('/', async (req, res) => {
   try {
-    const { text, enabled } = req.body;
-    if (!text || typeof text !== 'string') {
+    const { text, enabled, model, scope, categories } = req.body;
+    if (typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Prompt text is required' });
     }
-    const prompt = await stylePrompts.createPrompt(text, enabled);
+    // normalize categories (string, array or null)
+    const cats = normalizeCategories(categories);
+    const prompt = await stylePrompts.createPrompt(text.trim(), enabled, model, scope, cats);
     res.status(201).json(prompt);
   } catch (err) {
     console.error('Failed to create style prompt', err);
@@ -1110,14 +1653,36 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update prompt text
+// Update prompt (text/model/scope/categories)
 router.patch('/:id', async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || typeof text !== 'string') {
-      return res.status(400).json({ error: 'Prompt text is required' });
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid prompt id' });
     }
-    const prompt = await stylePrompts.updatePrompt(req.params.id, text);
+
+    const { text, model, scope, categories } = req.body;
+
+    if (text === undefined && model === undefined && scope === undefined && categories === undefined) {
+      return res.status(400).json({ error: 'Nothing to update. Provide one of: text, model, scope, categories.' });
+    }
+
+    if (text !== undefined && typeof text !== 'string') {
+      return res.status(400).json({ error: 'Prompt text must be a string if provided' });
+    }
+    if (model !== undefined && model !== null && typeof model !== 'string') {
+      return res.status(400).json({ error: 'Model must be a string or null' });
+    }
+    if (scope !== undefined && scope !== null && typeof scope !== 'string') {
+      return res.status(400).json({ error: 'Scope must be a string or null' });
+    }
+    if (categories !== undefined && !(categories === null || typeof categories === 'string' || Array.isArray(categories))) {
+      return res.status(400).json({ error: 'Categories must be a string (comma-separated), array of strings, or null' });
+    }
+
+    const cats = (categories === undefined) ? undefined : normalizeCategories(categories);
+
+    const prompt = await stylePrompts.updatePrompt(id, text, model, scope, cats);
     res.json(prompt);
   } catch (err) {
     console.error('Failed to update style prompt', err);
@@ -1183,7 +1748,12 @@ File: app/server/routes/admin/stylePromptsUI.js
 ================
 import express from 'express';
 import { requireApiKey } from '../../middleware/requireApiKey.js';
-import { getAll as getStylePrompts, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
+import {
+  getAll as getStylePrompts,
+  createPrompt as createStylePrompt,
+  updatePrompt as updateStylePrompt,
+  togglePrompt as toggleStylePrompt
+} from '../../../db/stylePrompts.js';
 import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
 
 function escapeHtml(str) {
@@ -1192,53 +1762,250 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\"/g, '&quot;')
+    .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
 const router = express.Router();
 router.use(express.urlencoded({ extended: true }));
 
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
+
+const prettyCat = (c) => c.replace(/_/g, ' ');
+
+const renderCategoryCheckboxes = (name, selected = []) => `
+  <div class="group">
+    <div class="label-row">
+      <label class="label">Categories</label>
+      <button
+        type="button"
+        class="link small"
+        onclick="(function(el){ const g=el.closest('.group'); g.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.checked=false) })(this)"
+      >Clear</button>
+    </div>
+    <div class="chips">
+      ${ALLOWED_CATEGORIES.map((c) => `
+        <label class="chip">
+          <input type="checkbox" name="${name}" value="${c}" ${Array.isArray(selected) && selected.includes(c) ? 'checked' : ''}/>
+          <span>${prettyCat(c)}</span>
+        </label>
+      `).join('')}
+    </div>
+    <div class="muted">Leave none selected to apply to all categories.</div>
+  </div>
+`;
+
 // Admin UI page - system prompts + style prompts
 router.get('/admin/style-prompts-ui', async (req, res, next) => {
   try {
-    const [stylePrompts, systemPrompts] = await Promise.all([
-      getStylePrompts(),
-      getSystemPrompts()
-    ]);
+    const [stylePrompts, systemPrompts] = await Promise.all([getStylePrompts(), getSystemPrompts()]);
+
+    // Allowed OpenAI chat models for selection
+    const allowedModelsSystem = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
+    const allowedModelsStyle = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+
+    const renderModelSelect = (name, selected, isSystem = false) => `
+      <div class="field">
+        <label class="label">Model</label>
+        <select class="select" name="${name}">
+          ${(isSystem ? allowedModelsSystem : allowedModelsStyle)
+            .map((m) => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`)
+            .join('')}
+        </select>
+      </div>
+    `;
+
+    const renderScopeSelect = (name, selected) => `
+      <div class="field">
+        <label class="label">Scope</label>
+        <select class="select" name="${name}">
+          ${['location', 'catchment', 'icon']
+            .map((s) => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`)
+            .join('')}
+        </select>
+      </div>
+    `;
 
     res.set('Cache-Control', 'no-store');
 
     res.send(`
       <html>
         <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width,initial-scale=1" />
           <title>Prompts Configuration</title>
+          <style>
+            :root{
+              --bg:#0b0d11;--surface:#0f1320;--panel:#121828;--panel2:#0e1422;--elev:rgba(255,255,255,0.04);
+              --border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;--ink-2:#cfd7e3;--accent:#6aa4ff;--accent-2:#3b82f6;
+              --danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
+              --radius:12px; --radius-sm:10px; --pad:14px
+            }
+            *{box-sizing:border-box}
+            html,body{height:100%}
+            body{margin:0;background:radial-gradient(1200px 600px at 20% -10%, rgba(59,130,246,.08), transparent 50%),radial-gradient(1000px 700px at 110% 10%, rgba(16,185,129,.06), transparent 50%),var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+            .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,rgba(11,13,17,.9),rgba(11,13,17,.65) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 16px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
+            .brand{font-weight:800;letter-spacing:.02em}
+            .nav{display:flex;gap:10px;align-items:center}
+            .nav a{color:#b7cdfc;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+            .nav a:hover{background:rgba(138,180,255,.10);border-color:rgba(138,180,255,.2)}
+            .wrap{max-width:1100px;margin:76px auto 40px;padding:0 16px}
+            h1{font-size:20px;margin:24px 0 12px}
+            h2{font-size:16px;margin:18px 0 10px;color:#d6deea}
+            .panel{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin:12px 0 22px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+            .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+            .muted{color:var(--muted)}
+            .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+            .label-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+            .label{font-weight:700;color:#d6deea}
+            .field{display:flex;flex-direction:column;gap:6px;min-width:200px}
+            .textarea, textarea, input[type="text"]{width:100%;background:var(--surface);border:1px solid #283044;border-radius:var(--radius-sm);color:var(--ink);padding:10px 12px}
+            textarea{min-height:88px;resize:vertical}
+            textarea:focus, input[type="text"]:focus, select:focus{outline:2px solid rgba(106,164,255,.35);border-color:#35507c}
+            select{background:var(--surface);border:1px solid #283044;border-radius:var(--radius-sm);color:var(--ink);padding:10px 12px}
+            .card{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--radius);padding:12px 12px 14px;margin:12px 0}
+            .card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+            .card-title{font-weight:800;color:#eef3fb}
+            .badge{font-size:12px;padding:4px 8px;border-radius:999px;background:#1b2337;color:#cfe1ff;border:1px solid #2b3550}
+            .chips{display:flex;flex-wrap:wrap;gap:8px}
+            .chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #2b3550;border-radius:999px;background:#0e1422;color:#cfe1ff;cursor:pointer;user-select:none}
+            .chip input{appearance:none;width:0;height:0;position:absolute;opacity:0}
+            .chip span{pointer-events:none}
+            .chip:has(input:checked){background:#203056;border-color:#38558d}
+            .group{border:1px dashed #283044;border-radius:var(--radius-sm);padding:10px;margin:10px 0}
+            .switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+            .switch input{appearance:none;width:0;height:0;position:absolute;opacity:0}
+            .switch .track{position:relative;width:44px;height:24px;background:#2a3246;border:1px solid #3a435a;border-radius:999px;transition:all .2s ease}
+            .switch .track:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;background:#cfd8e3;border-radius:50%;transition:transform .2s ease, background .2s ease}
+            .switch input:checked + .track{background:#2e7d5b;border-color:#2e7d5b}
+            .switch input:checked + .track:after{transform:translateX(20px);background:#fff}
+            .switch .txt{color:#cfe1ff}
+            .actions{display:flex;justify-content:flex-end;margin-top:12px}
+            .btn{background:var(--accent);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:800;cursor:pointer}
+            .btn:hover{background:var(--accent-2)}
+            .btn.secondary{background:#2b3550}
+            .btn.danger{background:var(--danger)}
+            .link{background:transparent;border:0;color:#9fb8ff;cursor:pointer;padding:0}
+            .small{font-size:12px}
+            @media (max-width:720px){
+              .field{min-width:140px}
+            }
+          </style>
         </head>
         <body>
-          <h1>System Prompts</h1>
-          <form method="POST" action="/admin/system-prompts-ui/update">
-            ${systemPrompts.map(p => `
-              <div>
-                <label for="${p.key}">${p.key}</label><br/>
-                <textarea name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea><br/>
+          <header class="topbar">
+            <div class="brand">Art Factory</div>
+            <nav class="nav">
+              <a href="/admin/style-prompts-ui">Style Prompts</a>
+              <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+              <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+            </nav>
+          </header>
+          <div class="wrap">
+            <div class="section-head">
+              <h1>System Prompts</h1>
+              <span class="muted">Edit system-wide instructions and choose models</span>
+            </div>
+            <form class="panel" method="POST" action="/admin/system-prompts-ui/update">
+              ${systemPrompts.map(p => `
+                <div class="card">
+                  <div class="card-h">
+                    <div class="row">
+                      <div class="card-title">${escapeHtml(p.key)}</div>
+                      <span class="badge">system</span>
+                    </div>
+                    <div class="row">
+                      ${renderModelSelect('model_' + p.key, p.model, true)}
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label class="label" for="${p.key}">Prompt Text</label>
+                    <textarea class="textarea" name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea>
+                  </div>
+                </div>
+              `).join('')}
+              <div class="actions">
+                <button class="btn" type="submit">Save System Prompts</button>
               </div>
-            `).join('')}
-            <button type="submit">Save System Prompts</button>
-          </form>
+            </form>
 
-          <h1>Style Prompts</h1>
-          <form method="POST" action="/admin/style-prompts-ui/update">
-            ${stylePrompts.map(p => `
-              <div>
-                <label for="style-${p.id}">Prompt #${p.id}</label><br/>
-                <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
-                <label>
-                  <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
-                </label>
+            <div class="section-head">
+              <h1>Style Prompts</h1>
+              <span class="muted">Prompts used to generate styles; toggle, scope, categories and model</span>
+            </div>
+            <form class="panel" method="POST" action="/admin/style-prompts-ui/update">
+              ${stylePrompts.map(p => `
+                <div class="card">
+                  <div class="card-h">
+                    <div class="row">
+                      <div class="card-title">Prompt #${p.id}</div>
+                      <span class="badge">${escapeHtml(p.scope || 'location')}</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/>
+                      <span class="track"></span>
+                      <span class="txt">${p.enabled ? 'Enabled' : 'Disabled'}</span>
+                    </label>
+                  </div>
+
+                  <div class="row" style="margin-bottom:8px">
+                    ${renderModelSelect('model_' + p.id, p.model)}
+                    ${renderScopeSelect('scope_' + p.id, p.scope)}
+                  </div>
+
+                  ${renderCategoryCheckboxes('categories_' + p.id + '[]', Array.isArray(p.categories) ? p.categories : [])}
+
+                  <div class="field">
+                    <label class="label" for="style-${p.id}">Prompt Text</label>
+                    <textarea class="textarea" name="text_${p.id}" rows="3" cols="80">${escapeHtml(p.text)}</textarea>
+                  </div>
+                </div>
+              `).join('')}
+              <div class="actions">
+                <button class="btn" type="submit">Save Style Prompts</button>
               </div>
-            `).join('')}
-            <button type="submit">Save Style Prompts</button>
-          </form>
+            </form>
+
+            <h2>Add New Style Prompt</h2>
+            <form class="panel" method="POST" action="/admin/style-prompts-ui/create">
+              <div class="card">
+                <div class="card-h">
+                  <div class="card-title">New Style Prompt</div>
+                  <label class="switch">
+                    <input type="checkbox" name="enabled" checked/>
+                    <span class="track"></span>
+                    <span class="txt">Enabled</span>
+                  </label>
+                </div>
+
+                <div class="row" style="margin-bottom:8px">
+                  ${renderModelSelect('model', null)}
+                  ${renderScopeSelect('scope', 'location')}
+                </div>
+
+                ${renderCategoryCheckboxes('categories[]', [])}
+
+                <div class="field">
+                  <label class="label" for="new-style-text">Prompt Text</label>
+                  <textarea id="new-style-text" class="textarea" name="text" rows="3" cols="80"></textarea>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn" type="submit">Add Style Prompt</button>
+              </div>
+            </form>
+          </div>
         </body>
       </html>
     `);
@@ -1254,11 +2021,47 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
     const currentList = await getSystemPrompts();
     const enabledByKey = Object.fromEntries(currentList.map(p => [p.key, !!p.enabled]));
 
-    const updates = Object.entries(req.body);
+    const allowedModelsSystem = ['gpt-4o-mini','gpt-4o','gpt-4.1-mini','gpt-4.1','gpt-5','gpt-5-mini','gpt-5-nano'];
+    const normModel = (m) => (allowedModelsSystem.includes(String(m || '')) ? String(m) : null);
+
     console.log('SystemPrompt Update body:', req.body);
-    for (const [key, text] of updates) {
+
+    for (const p of currentList) {
+      const key = p.key;
+      const text = req.body[key] ?? '';
+      const model = normModel(req.body['model_' + key]);
       const enabled = enabledByKey.hasOwnProperty(key) ? enabledByKey[key] : true;
-      await updateSystemPrompt(key, text || "", enabled);
+      await updateSystemPrompt(key, text || "", enabled, model);
+    }
+
+    res.redirect('/admin/style-prompts-ui');
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Handle updates for style prompts
+router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
+  try {
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const normModel = (m) => (allowedModels.includes(String(m || '')) ? String(m) : null);
+    const normScope = (s) => (['location','catchment','icon'].includes(String(s || 'location')) ? String(s || 'location') : 'location');
+
+    for (const key of Object.keys(req.body)) {
+      if (key.startsWith('text_')) {
+        const id = key.split('_')[1];
+        const text = req.body['text_' + id];
+        const enabled = req.body['enabled_' + id] !== undefined;
+        const model = normModel(req.body['model_' + id]);
+        const scope = normScope(req.body['scope_' + id]);
+        // categories may be provided as categories_id or categories_id[] depending on parser
+        const rawCats = (req.body['categories_' + id] !== undefined) ? req.body['categories_' + id] : req.body['categories_' + id + '[]'];
+
+        if (text !== undefined || model !== null || scope || rawCats !== undefined) {
+          await updateStylePrompt(id, text, model, scope, rawCats);
+        }
+        await toggleStylePrompt(id, enabled);
+      }
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
@@ -1266,20 +2069,21 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   }
 });
 
-  
-// Handle updates for style prompts
-router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
+/**
+ * Create a new style prompt from the UI
+ */
+router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
   try {
-    for (const key of Object.keys(req.body)) {
-      if (key.startsWith('text_')) {
-        const id = key.split('_')[1];
-        const text = req.body[`text_${id}`];
-        const enabled = req.body[`enabled_${id}`] !== undefined;
-        if (text) {
-          await updateStylePrompt(id, text);
-        }
-        await toggleStylePrompt(id, enabled);
-      }
+    const text = req.body?.text;
+    const enabled = req.body?.enabled !== undefined;
+    const allowedModels = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+    const modelInput = req.body?.model;
+    const model = allowedModels.includes(String(modelInput || '')) ? String(modelInput) : null;
+    const scope = (['location','catchment','icon'].includes(String(req.body?.scope || 'location')) ? String(req.body?.scope || 'location') : 'location');
+    const rawCats = (req.body?.categories !== undefined) ? req.body.categories : req.body?.['categories[]'];
+
+    if (typeof text === 'string' && text.trim().length > 0) {
+      await createStylePrompt(text.trim(), enabled, model, scope, rawCats);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {
@@ -1408,6 +2212,25 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
     const imageSource = (req.body.imageSource || '').toLowerCase() === 'openverse' ? 'openverse' : 'google';
     if (!valid) return res.status(400).json({ error: 'invalid_request', details: errors });
 
+    // Optional Openverse config
+    const ovTopN = Number(req.body?.openverseTopN);
+    const ovPerPage = Number(req.body?.openversePerPage);
+    const ovMaxPages = Number(req.body?.openverseMaxPages);
+    let ovParams = {};
+    if (req.body?.openverseParams && typeof req.body.openverseParams === 'object') {
+      ovParams = req.body.openverseParams;
+    }
+
+    // Build DB payload/update objects
+    const base = { name, lat, lon, intro, image_source: imageSource };
+    const updateData = { image_source: imageSource };
+    if (imageSource === 'openverse') {
+      if (Number.isFinite(ovTopN) && ovTopN > 0) { base.openverse_top_n = ovTopN; updateData.openverse_top_n = ovTopN; }
+      if (Number.isFinite(ovPerPage) && ovPerPage > 0) { base.openverse_per_page = ovPerPage; updateData.openverse_per_page = ovPerPage; }
+      if (Number.isFinite(ovMaxPages) && ovMaxPages > 0) { base.openverse_max_pages = ovMaxPages; updateData.openverse_max_pages = ovMaxPages; }
+      if (ovParams && Object.keys(ovParams).length > 0) { base.openverse_params = ovParams; updateData.openverse_params = ovParams; }
+    }
+
     // Find-or-create to avoid 23505 on unique (lower(name), lat, lon)
     let id;
     try {
@@ -1422,7 +2245,7 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
         }
       } else {
         const insert = await db('catchments')
-          .insert({ name, lat, lon, intro })
+          .insert(base)
           .returning(['id']);
         id = insert?.[0]?.id;
         if (!id) throw new Error('Failed to create catchment');
@@ -1434,6 +2257,15 @@ router.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       // Attach minimal context and bubble to error handler
       e.context = { route: 'POST /catchments', phase: 'db_find_or_create', name, lat, lon };
       throw e;
+    }
+
+    // Persist/merge config onto catchment (idempotent)
+    try {
+      await db('catchments').where({ id }).update(updateData);
+    } catch (e) {
+      if (typeof req.log === 'function') {
+        req.log({ event: 'catchment_update_failed', catchmentId: id, message: e?.message });
+      }
     }
 
     // Enqueue stage 1 explicitly (idempotent jobId)
@@ -1573,7 +2405,8 @@ import express from 'express';
 import db from '../../db/client.js';
 import { qPublish } from '../../queue/queues.js';
 import { requireApiKey } from '../middleware/requireApiKey.js';
-import { createMockups } from '../../services/framemock.js';
+import { createMockups, getFrameUrlsForOrientation } from '../../services/framemock.js';
+import { deleteImage, getOrientationByUrl } from '../../services/cloudinary.js';
 
 const router = express.Router();
 
@@ -1588,7 +2421,7 @@ router.get('/admin/artworks', async (req, res, next) => {
       .join('locations as l', 'l.id', 'p.location_id')
       .select(
         'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
-        'p.id as photo_id','l.name as location_name'
+        'p.id as photo_id','l.name as location_name','p.thumbnail_url as photo_thumbnail_url','p.detail_url as photo_detail_url'
       )
       .where('l.catchment_id', catchmentId)
       .modify(qb => {
@@ -1611,15 +2444,86 @@ router.get('/admin/artworks', async (req, res, next) => {
 // Moderate generated artwork (approve => enqueue publish, reject => mark only)
 router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
-  const { action } = req.body || {};
+  const rawAction = (req.body && req.body.action) || '';
+  const action = String(rawAction).toLowerCase() === 'fail' ? 'reject' : String(rawAction).toLowerCase();
   const t0 = Date.now();
+  if (typeof req.log === 'function') req.log({ event: 'moderate_artwork_request', artworkId: id, action: rawAction, normalizedAction: action, hasApiKey: Boolean(req.headers['x-api-key'] || req.headers['x-ingest-key']) });
   try {
     if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
 
     if (action === 'reject') {
-      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
-      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
-      return res.json({ ok: true, status: 'rejected' });
+      // Load the artwork row to determine Cloudinary identifier(s)
+      const art = await db('artwork').where({ id }).first();
+
+      if (typeof req.log === 'function') {
+        let mockCount = 0;
+        try {
+          if (Array.isArray(art?.mockup_urls)) mockCount = art.mockup_urls.length;
+          else if (typeof art?.mockup_urls === 'string') mockCount = (JSON.parse(art.mockup_urls) || []).length;
+        } catch {}
+        req.log({
+          event: 'moderate_artwork.reject.loaded',
+          artworkId: id,
+          hasArt: Boolean(art),
+          hasImageUrl: Boolean(art?.image_url),
+          photo_id: art?.photo_id,
+          style_prompt_id: art?.style_prompt_id,
+          mockup_count: mockCount
+        });
+      }
+
+      // Best-effort: delete the Cloudinary asset for this artwork
+      try {
+        if (art?.image_url) {
+          if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.delete_image_by_url', artworkId: id, url: art.image_url });
+          await deleteImage({ url: art.image_url });
+        } else if (art?.photo_id && art?.style_prompt_id != null) {
+          // Reconstruct the deterministic publicId used during upload
+          const fallbackPublicId = `art-factory/artwork/artwork_${art.photo_id}_${art.style_prompt_id}_0`;
+          if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.delete_image_by_public_id', artworkId: id, public_id: fallbackPublicId });
+          await deleteImage({ publicId: fallbackPublicId });
+        } else {
+          console.warn('moderate_artwork.reject: no_image_reference', { artworkId: id });
+        }
+      } catch (err) {
+        console.warn('moderate_artwork.reject: cloudinary_delete_failed', { artworkId: id, error: err && err.message });
+      }
+
+      // Optional: delete any mockup assets linked to this artwork
+      try {
+        const mocks = Array.isArray(art?.mockup_urls)
+          ? art.mockup_urls
+          : (typeof art?.mockup_urls === 'string' ? (JSON.parse(art.mockup_urls) || []) : []);
+        for (const u of (Array.isArray(mocks) ? mocks : [])) {
+          try {
+            if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.mockup_delete', artworkId: id, url: u });
+            await deleteImage({ url: u });
+          } catch (e) {
+            console.warn('moderate_artwork.reject: mockup_delete_failed', { artworkId: id, error: e && e.message, url: u });
+          }
+        }
+      } catch (_) {}
+
+      // Remove any pending publish job for this artwork (if previously enqueued)
+      try {
+        const jobId = `publish:${id}`;
+        const job = await qPublish.getJob(jobId);
+        if (job) {
+          await job.remove();
+          if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.publish_job_removed', artworkId: id, jobId });
+        } else {
+          if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.publish_job_not_found', artworkId: id, jobId });
+        }
+      } catch (err) {
+        console.warn('moderate_artwork.reject: remove_publish_job_failed', { artworkId: id, error: err && err.message });
+      }
+
+      // Permanently remove the artwork from the database so it no longer appears in moderation
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork.reject.deleting_db_row', artworkId: id });
+      await db('artwork').where({ id }).del();
+
+      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject_delete', duration_ms: Date.now() - t0 });
+      return res.json({ ok: true, status: 'deleted' });
     }
 
     console.log('moderationArtwork: approve branch entered', { id, action });
@@ -1642,7 +2546,16 @@ router.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
 
       try {
         console.log('Calling createMockups for artwork', { id, image_url: art.image_url });
-        const mockupUrls = await createMockups(art.image_url);
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
+        const mockupUrls = await createMockups({
+          frameUrl1,
+          frameUrl2,
+          frameUrl3,
+          artUrl: art.image_url,
+          orientation,
+          enableInnerShadow: true
+        });
         console.log('Mockups generated', { id, mockupsCount: mockupUrls.length });
         await db('artwork').where({ id }).update({ mockup_urls: JSON.stringify(mockupUrls) });
         if (typeof req.log === 'function') {
@@ -1673,7 +2586,7 @@ import express from 'express';
 
 const router = express.Router();
 
-// Moderation UI for artwork
+// Moderation UI for artwork - single item fullscreen review
 router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
   try {
@@ -1684,64 +2597,334 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Moderate Artwork</title>
 <style>
-  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
-  h1{font-size:18px;margin:12px 0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
-  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
-  .img{width:100%;height:220px;object-fit:cover;display:block;background:#0f1320}
-  .meta{padding:10px}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
-  .reject{background:#ef4444}
-  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
-  .muted{color:#9aa4b2}
-</style>
-<div class="wrap">
-  <h1>Moderate Artwork</h1>
-  <div class="muted">Catchment: ${catchmentId}</div>
-  <div style="max-width:420px;margin:10px 0">
-    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
-  </div>
-  <div id="grid" class="grid"></div>
-</div>
-<script>
-const apiKeyInput = document.getElementById('apiKey');
-const grid = document.getElementById('grid');
-async function j(u, opt){ const r = await fetch(u, opt); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function load(){
-  const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
-  grid.innerHTML='';
-  for(const a of data.artworks){
-    const card=document.createElement('div'); card.className='card';
-    const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
-    card.innerHTML = \`
-      <img class="img" src="\${mock||a.image_url}" alt=""/>
-      <div class="meta">
-        <div class="row"><div>\${a.location_name||''}</div></div>
-        <div class="row">
-          <button data-act="approve" data-id="\${a.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="\${a.id}">Reject</button>
-        </div>
-      </div>\`;
-    grid.appendChild(card);
+  :root{
+    --bg:#0b0d11; --panel:#11151c; --panel2:#151922; --border:#202636; --muted:#9aa4b2;
+    --fg:#e7ecf3; --blue:#6aa4ff; --red:#ef4444; --green:#22c55e; --shadow:0 10px 30px rgba(0,0,0,.4);
   }
-}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;overscroll-behavior:none}
+  button{background:var(--blue);border:0;border-radius:10px;color:#fff;padding:12px 16px;font-weight:700;cursor:pointer}
+  button.fail{background:var(--red)}
+  button:active{transform:translateY(1px)}
+  input{background:#0f1320;border:1px solid #283044;border-radius:8px;color:var(--fg);padding:8px}
+  .topbar{
+    position:fixed;inset:0 0 auto 0;height:56px;display:flex;align-items:center;gap:12px;
+    background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);
+    padding:8px 14px;z-index:40;backdrop-filter:saturate(120%) blur(6px);border-bottom:1px solid rgba(32,38,54,.5)
+  }
+  .title{font-size:14px;font-weight:700;opacity:.9}
+  .muted{color:var(--muted)}
+  .grow{flex:1}
+  .viewer{
+    position:fixed;inset:56px 0 90px 0; /* below topbar, above controls */
+    display:flex;align-items:center;justify-content:center;overflow:hidden
+  }
+  #artImg{
+    max-width:100vw;max-height:calc(100vh - 146px); /* 56 topbar + 90 controls */
+    object-fit:contain;display:block;background:#0f1320;border-radius:14px;box-shadow:var(--shadow)
+  }
+  .controls{
+    position:fixed;inset:auto 0 0 0;height:90px;display:flex;align-items:center;justify-content:center;gap:12px;
+    background:linear-gradient(0deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);z-index:30;border-top:1px solid rgba(32,38,54,.5)
+  }
+  .pill{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:var(--muted)}
+  .metaRow{position:fixed;left:12px;bottom:96px;color:var(--muted);font-size:12px;z-index:20}
+  .photoContainer{
+    position:fixed;top:10px;right:10px;z-index:50;display:none; /* toggled via JS */
+  }
+  .photoContainer img{
+    display:block;width:160px;height:160px;object-fit:cover;border-radius:12px;border:1px solid var(--border);box-shadow:var(--shadow);background:#0f1320
+  }
+  /* Invisible hot corner to toggle photo visibility */
+  .hotCorner{
+    position:fixed;top:0;right:0;width:160px;height:160px;z-index:60;background:transparent;cursor:pointer;
+  }
+  .toast{
+    position:fixed;right:12px;bottom:102px;background:#1b2230;border:1px solid #2c3650;color:#e7ecf3;border-radius:10px;padding:10px 12px;z-index:70;
+    display:none;max-width:60vw;box-shadow:var(--shadow);font-size:12px
+  }
+  .empty{
+    position:fixed;inset:56px 0 0 0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:16px
+  }
+  .nav{display:flex;gap:10px;align-items:center;margin-left:8px}
+  .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+  .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
+</style>
 
-grid.addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button'); if(!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  try{
-    await fetch('/moderate/artwork/'+id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
-    await load();
-  }catch(e){ alert(e.message); }
-});
+<div class="topbar">
+  <div class="title">Moderate Artwork</div>
+  <div class="pill">Catchment: ${catchmentId}</div>
+  <div id="location" class="pill">—</div>
+  <nav class="nav">
+    <a href="/admin/style-prompts-ui">Style Prompts</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+  </nav>
+  <div class="grow"></div>
+  <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)" style="min-width:260px"/>
+</div>
 
-load();
+<div id="viewer" class="viewer">
+  <img id="artImg" alt="Artwork"/>
+  <div id="photoContainer" class="photoContainer" aria-hidden="true" tabindex="-1">
+    <img id="photoThumb" alt="Source photo (Openverse thumbnail)"/>
+  </div>
+  <div id="hotCorner" class="hotCorner" title="Toggle source photo (z)"></div>
+</div>
+
+<div class="controls">
+  <button id="passBtn">Pass (p)</button>
+  <button id="failBtn" class="fail">Fail (f)</button>
+  <div id="count" class="pill" style="margin-left:16px">0 / 0</div>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="empty" class="empty" style="display:none">No pending artwork. Try again later.</div>
+
+<script>
+(function(){
+  const apiKeyInput = document.getElementById('apiKey');
+  const artImg = document.getElementById('artImg');
+  const locationEl = document.getElementById('location');
+  const countEl = document.getElementById('count');
+  const passBtn = document.getElementById('passBtn');
+  const failBtn = document.getElementById('failBtn');
+  const toast = document.getElementById('toast');
+  const photoContainer = document.getElementById('photoContainer');
+  const photoThumb = document.getElementById('photoThumb');
+  const hotCorner = document.getElementById('hotCorner');
+  const emptyEl = document.getElementById('empty');
+
+  const PRELOAD_AHEAD = 5;
+
+  let items = [];
+  let idx = 0;
+  let showPhoto = false;
+  const cache = new Map(); // id -> { art: Image, thumb: Image }
+
+  function showToast(msg){
+    toast.textContent = msg;
+    toast.style.display='block';
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(()=>{ toast.style.display='none'; }, 3000);
+  }
+
+  function j(u, opt){ return fetch(u, opt).then(async r => { if(!r.ok){ const t = await r.text().catch(()=>r.statusText); throw new Error(t || ('HTTP '+r.status)); } return r.json(); }); }
+
+  function safeParseJson(v){
+    if (Array.isArray(v)) return v;
+    if (!v) return [];
+    try { const x = JSON.parse(v); return Array.isArray(x) ? x : []; } catch(e){ return []; }
+  }
+
+  function displayUrl(a){
+    const mocks = safeParseJson(a.mockup_urls);
+    const mock = mocks.length ? mocks[0] : null;
+    return mock || a.image_url;
+  }
+
+  function ensureCache(a){
+    let c = cache.get(a.id);
+    if (!c) { c = {}; cache.set(a.id, c); }
+    if (!c.art){
+      const img = new Image();
+      img.decoding = 'async';
+      img.loading = 'eager';
+      img.src = displayUrl(a);
+      c.art = img;
+    }
+    if (a.photo_thumbnail_url && !c.thumb){
+      const t = new Image();
+      t.decoding = 'async';
+      t.loading = 'eager';
+      t.src = a.photo_thumbnail_url;
+      c.thumb = t;
+    }
+    return c;
+  }
+
+  function preloadAhead(startIndex){
+    for (let i = startIndex; i < Math.min(items.length, startIndex + PRELOAD_AHEAD + 1); i++){
+      ensureCache(items[i]);
+    }
+  }
+
+  function render(){
+    const total = items.length;
+    if (total === 0){
+      emptyEl.style.display = 'flex';
+      document.body.classList.add('empty-state');
+      artImg.removeAttribute('src');
+      locationEl.textContent = '—';
+      countEl.textContent = '0 / 0';
+      photoContainer.style.display = 'none';
+      return;
+    }
+    emptyEl.style.display = 'none';
+
+    const a = items[idx];
+    const c = cache.get(a.id);
+    const src = (c && c.art && c.art.complete) ? c.art.src : displayUrl(a);
+    if (artImg.src !== src){
+      artImg.src = src;
+    }
+    locationEl.textContent = a.location_name || '—';
+    countEl.textContent = (idx + 1) + ' / ' + total;
+
+    if (showPhoto && a.photo_thumbnail_url){
+      if (!photoThumb.src || photoThumb.src !== a.photo_thumbnail_url){
+        const ct = cache.get(a.id);
+        photoThumb.src = (ct && ct.thumb) ? ct.thumb.src : a.photo_thumbnail_url;
+      }
+      photoContainer.style.display = 'block';
+      photoContainer.setAttribute('aria-hidden','false');
+    } else {
+      photoContainer.style.display = 'none';
+      photoContainer.setAttribute('aria-hidden','true');
+    }
+  }
+
+  function advance(){
+    if (idx < items.length - 1){
+      idx++;
+      preloadAhead(idx);
+      render();
+    } else {
+      // End of queue
+      showToast('All done');
+      idx = items.length - 1;
+      render();
+    }
+  }
+
+  async function act(action){
+    const a = items[idx];
+    if (!a) return;
+
+    // Capture state before optimistic advance
+    const curId = a.id;
+    const prevIdx = idx;
+
+    console.log('[ModerationUI] act start', { action, artworkId: curId, idx: prevIdx, hasApiKey: !!apiKeyInput.value.trim() });
+
+    // Optimistic advance before network
+    advance();
+
+    const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+    const key = apiKeyInput.value.trim();
+    if (key) headers['x-api-key'] = key;
+
+    try {
+      const r = await fetch('/moderate/artwork/' + curId, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action })
+      });
+
+      if (!r.ok) {
+        const text = await r.text().catch(() => r.statusText);
+        console.warn('[ModerationUI] act failed', { action, artworkId: curId, status: r.status, statusText: r.statusText, body: text });
+        showToast((action === 'approve' ? 'Pass' : 'Fail') + ' failed: ' + r.status + ' ' + (text || ''));
+        // Revert optimistic advance
+        idx = prevIdx;
+        render();
+        return;
+      }
+
+      console.log('[ModerationUI] act success', { action, artworkId: curId, status: r.status });
+      if (action === 'reject') {
+        showToast('Artwork deleted');
+      } else if (action === 'approve') {
+        showToast('Artwork approved');
+      }
+    } catch (e) {
+      console.error('[ModerationUI] act network error', { action, artworkId: curId, error: e && (e.message || e) });
+      showToast('Failed to ' + (action === 'approve' ? 'pass' : 'fail') + ' id ' + curId + ': ' + (e.message || 'error'));
+      // Revert optimistic advance on network error
+      idx = prevIdx;
+      render();
+    }
+  }
+
+  function togglePhoto(){
+    showPhoto = !showPhoto;
+    render();
+  }
+
+  function bindHotkeys(){
+    document.addEventListener('keydown', (ev)=>{
+      const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      if (ev.key === 'p' || ev.key === 'P'){ ev.preventDefault(); act('approve'); }
+      if (ev.key === 'f' || ev.key === 'F'){ ev.preventDefault(); act('reject'); }
+      if (ev.key === 'z' || ev.key === 'Z'){ ev.preventDefault(); togglePhoto(); }
+    });
+  }
+
+  function persistApiKey(){
+    const saved = localStorage.getItem('xApiKey') || '';
+    if (saved) apiKeyInput.value = saved;
+    apiKeyInput.addEventListener('input', ()=>{
+      localStorage.setItem('xApiKey', apiKeyInput.value || '');
+    });
+  }
+
+  async function load(){
+    try{
+      const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
+      items = Array.isArray(data.artworks) ? data.artworks : [];
+      idx = 0;
+      if (items.length > 0){
+        // seed cache and preload
+        ensureCache(items[0]);
+        preloadAhead(0);
+      }
+      render();
+    }catch(e){
+      showToast('Failed to load artworks: ' + e.message);
+      items = [];
+      idx = 0;
+      render();
+    }
+  }
+
+  // Wire up
+  passBtn.addEventListener('click', ()=> act('approve'));
+  failBtn.addEventListener('click', ()=> act('reject'));
+  hotCorner.addEventListener('click', togglePhoto);
+
+  bindHotkeys();
+  persistApiKey();
+  load();
+})();
 </script>
 </html>`);
   } catch (err) { next(err); }
+});
+
+export default router;
+
+================
+File: app/server/routes/moderationCatchmentArtworkUI.js
+================
+import express from 'express';
+
+const router = express.Router();
+
+/**
+ * Unify moderation UI: redirect catchment artwork moderation to the single artwork moderation screen.
+ * Old path: /admin/moderate-catchment-artwork/:catchmentId
+ * New unified screen: /admin/moderate-artwork/:catchmentId
+ */
+router.get('/admin/moderate-catchment-artwork/:catchmentId', async (req, res, next) => {
+  try {
+    const { catchmentId } = req.params;
+    // Permanent redirect to the unified moderation UI
+    res.redirect(301, `/admin/moderate-artwork/${encodeURIComponent(catchmentId)}`);
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;
@@ -1771,6 +2954,7 @@ router.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.openverse_id',
         'p.title',
         'p.creator',
@@ -1814,11 +2998,11 @@ router.get('/admin/photos/next', async (req, res, next) => {
       .whereExists(function () {
         this.select(1)
           .from('photos as p')
-          .whereRaw('p.location_id = l.id')
-          .andWhere('p.processed', false);
+      .whereRaw('p.location_id = l.id')
+      .andWhere(function() { this.where('p.processed', false).orWhereNull('p.processed'); });
       })
       .orderBy('l.created_at', 'asc')
-      .select('l.id', 'l.name')
+      .select('l.id', 'l.name', 'l.search_term')
       .first();
 
     if (!loc) {
@@ -1831,7 +3015,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
     // Up to 20 photos for this location that are not yet processed
     const photos = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function() { this.where('p.processed', false).orWhereNull('p.processed'); })
       .orderBy('p.created_at', 'desc')
       .limit(20)
       .select(
@@ -1840,6 +3024,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         // Openverse metadata columns as defined in schema (ov_*)
         'p.ov_id',
         'p.ov_title',
@@ -1864,7 +3049,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
 
     const remainingRow = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function() { this.where('p.processed', false).orWhereNull('p.processed'); })
       .count({ c: '*' })
       .first();
     const remaining = Number(remainingRow?.c ?? 0);
@@ -1886,7 +3071,7 @@ router.get('/admin/photos/next', async (req, res, next) => {
       });
     }
 
-    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+    res.json({ location: { id: loc.id, name: loc.name, search_term: loc.search_term }, photos, remaining });
   } catch (err) {
     next(err);
   }
@@ -1908,11 +3093,13 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Normalize decisions into a map for quick lookup
     const keepMap = new Map();
+    const iconMap = new Map();
     const ids = [];
     for (const d of decisions) {
       if (!d || !d.id) continue;
       ids.push(d.id);
       keepMap.set(d.id, Boolean(d.kept));
+      iconMap.set(d.id, d.icon === true);
     }
     if (ids.length === 0) {
       return res.status(400).json({ error: 'no_ids' });
@@ -1927,6 +3114,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
     const validIds = rows.map(r => r.id);
     const approveIds = validIds.filter(id => keepMap.get(id) === true);
     const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+    const iconTrueIds = validIds.filter(id => keepMap.get(id) === true && iconMap.get(id) === true);
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
@@ -1934,18 +3122,23 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 
     // Rejects: mark kept=false, processed=true
     if (rejectIds.length > 0) {
-      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true, icon: false });
     }
 
     // Approvals: kept=true, ensure Cloudinary upload present; then processed=true and enqueue artwork
     if (approveIds.length > 0) {
       // Set kept=true upfront for all approvals
-      await db('photos').whereIn('id', approveIds).update({ kept: true });
+      await db('photos').whereIn('id', approveIds).update({ kept: true, icon: false });
 
       // Separate those that already have assets vs need upload
       const approveRows = rows.filter(r => approveIds.includes(r.id));
       const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
       const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Set icon=true for requested subset of approved photos
+      if (iconTrueIds.length > 0) {
+        await db('photos').whereIn('id', iconTrueIds).update({ icon: true });
+      }
 
       // For those with existing assets: mark processed and enqueue
       if (haveAssets.length > 0) {
@@ -1986,6 +3179,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
         uploadedToCloudinary,
         enqueuedArtwork,
         deletedDueToUploadFailure,
+        iconTrue: iconTrueIds.length,
         duration_ms: Date.now() - t0
       });
     }
@@ -2007,6 +3201,7 @@ router.post('/moderate/location/:locationId', requireApiKey, async (req, res, ne
 router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
+  const icon = req.body?.icon === true;
   const t0 = Date.now();
   let uploadedToCloudinary = false;
   let enqueuedArtwork = false;
@@ -2015,7 +3210,7 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (!photo) return res.status(404).json({ error: 'not_found' });
 
     if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
+      await db('photos').where({ id }).update({ kept: false, processed: true, icon: false });
       if (typeof req.log === 'function') {
         req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
       }
@@ -2025,7 +3220,7 @@ router.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
     // Approve: mark kept; if Cloudinary upload fails, delete and move on
-    await db('photos').where({ id }).update({ kept: true });
+    await db('photos').where({ id }).update({ kept: true, icon });
 
     let hasAssets = Boolean(photo.cloudinary_id && photo.secure_url);
     if (!hasAssets) {
@@ -2092,7 +3287,12 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;padding-top:56px}
+  .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:12px;background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 14px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
+  .brand{font-weight:800;letter-spacing:.02em}
+  .nav{display:flex;gap:10px;align-items:center}
+  .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+  .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
   .wrap{max-width:1200px;margin:20px auto;padding:0 16px 88px}
   h1{font-size:18px;margin:12px 0}
   .muted{color:var(--muted)}
@@ -2102,6 +3302,9 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
   .card:hover{transform:translateY(-1px)}
   .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .icon-token{position:absolute;left:8px;top:8px;width:28px;height:28px;border-radius:8px;background:rgba(11,13,17,.75);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-weight:800;color:#d1d5db;z-index:10;cursor:pointer;user-select:none}
+  .card.icon .icon-token{background:rgba(99,102,241,.2);color:#ffd166;border-color:rgba(99,102,241,.5)}
+  .card.fail .icon-token{opacity:.5}
   .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
   .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
   .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
@@ -2123,11 +3326,21 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   a.link{color:#8ab4ff;text-decoration:none}
   .empty{padding:48px 16px;background:var(--panel);border:1px dashed var(--border);border-radius:12px;text-align:center}
 </style>
+<header class="topbar">
+  <div class="brand">Art Factory</div>
+  <nav class="nav">
+    <a href="/admin/style-prompts-ui">Style Prompts</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
+    <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate-artwork/'+encodeURIComponent(id) })()">Moderate Artwork</a>
+  </nav>
+</header>
+
 <div class="wrap">
   <h1>Moderate Photos</h1>
   <div class="row">
     <div class="muted small">Catchment: ${catchmentId}</div>
     <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="searchTermWrap" style="display:none">Openverse search: <span id="searchTerm">—</span></div>
     <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
   </div>
   <div style="margin:10px 0">
@@ -2145,7 +3358,7 @@ router.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     <div class="kpis">
       <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
       <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
-      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail • Tap star to mark Icon</div>
     </div>
     <button id="nextBtn" class="btn">Next</button>
   </div>
@@ -2158,6 +3371,8 @@ const grid = document.getElementById('grid');
 const locNameEl = document.getElementById('locName');
 const remainingWrap = document.getElementById('remainingWrap');
 const remainingEl = document.getElementById('remaining');
+const searchTermWrap = document.getElementById('searchTermWrap');
+const searchTermEl = document.getElementById('searchTerm');
 const passCountEl = document.getElementById('passCount');
 const failCountEl = document.getElementById('failCount');
 const nextBtn = document.getElementById('nextBtn');
@@ -2197,11 +3412,12 @@ function cardHTML(p) {
   } catch (_) {}
 
   return \`
-  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+  <div class="card\${p.icon ? ' icon' : ''}" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="icon-token" title="Mark as app icon">★</div>
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
-      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="small muted">score: \${(typeof p.score === 'number' && Number.isFinite(p.score)) ? p.score.toFixed(2) : ((p.score != null && p.score !== '') ? p.score : 0)}</div>
       <div class="badge pass">PASS</div>
     </div>
   </div>\`;
@@ -2210,7 +3426,21 @@ function cardHTML(p) {
 function render() {
   if (!current.location) return;
   locNameEl.textContent = current.location.name || '—';
-  grid.innerHTML = current.photos.map(cardHTML).join('');
+  const st = current.location.search_term || '';
+  if (st) {
+    searchTermWrap.style.display = 'inline-flex';
+    searchTermEl.textContent = st;
+  } else {
+    searchTermWrap.style.display = 'none';
+    searchTermEl.textContent = '—';
+  }
+  const html = Array.isArray(current.photos)
+    ? current.photos.map(p => {
+        try { return cardHTML(p); }
+        catch (e) { try { console.error('card_render_error', { id: p?.id, e }); } catch (_) {} return ''; }
+      }).join('')
+    : '';
+  grid.innerHTML = html;
   doneEl.style.display = 'none';
   // update counts (all pass by default)
   updateCounts();
@@ -2241,9 +3471,22 @@ function setBadge(card) {
 grid.addEventListener('click', (ev) => {
   const card = ev.target.closest('.card');
   if (!card) return;
-  // toggle fail on click
+
+  // If clicking the icon token, toggle icon state only
+  if (ev.target.closest('.icon-token')) {
+    const newIcon = !card.classList.contains('icon');
+    card.classList.toggle('icon', newIcon);
+    updateCounts();
+    return;
+  }
+
+  // Otherwise toggle fail on card click
   const willFail = !card.classList.contains('fail');
   card.classList.toggle('fail', willFail);
+  if (willFail) {
+    // Clear icon when marking as fail to avoid confusion
+    card.classList.remove('icon');
+  }
   setBadge(card);
   updateCounts();
 });
@@ -2257,7 +3500,8 @@ nextBtn.addEventListener('click', async () => {
     const decisions = current.photos.map(p => {
       const el = document.getElementById('card-' + p.id);
       const kept = el ? !el.classList.contains('fail') : true;
-      return { id: p.id, kept };
+      const icon = el ? el.classList.contains('icon') : false;
+      return { id: p.id, kept, icon };
     });
     await j('/moderate/location/' + current.location.id, {
       method: 'POST',
@@ -2278,6 +3522,8 @@ nextBtn.addEventListener('click', async () => {
 
 async function loadNext() {
   locNameEl.textContent = '…';
+  searchTermWrap.style.display = 'none';
+  searchTermEl.textContent = '…';
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
@@ -2623,6 +3869,150 @@ export async function uploadImage(
   throw lastErr || new Error('Unknown Cloudinary upload error');
 }
 
+// Attempt to derive a Cloudinary publicId from a secure URL
+function parsePublicIdFromUrl(url) {
+  try {
+    const u = new URL(String(url));
+    if (!/res\.cloudinary\.com$/i.test(u.hostname)) return null;
+
+    const marker = '/image/upload/';
+    const idx = u.pathname.indexOf(marker);
+    if (idx === -1) return null;
+
+    let rest = u.pathname.slice(idx + marker.length);
+    rest = rest.replace(/^\/+/, '');
+
+    // Handle optional transformation segment(s) before version/publicId, e.g.:
+    // /image/upload/w_900/v123/folder/name.jpg  OR  /image/upload/c_fill,w_900/folder/name.jpg
+    const segs = rest.split('/').filter(Boolean);
+    let i = 0;
+
+    // If the first segment is not a version (v123...), treat it as transformations and skip it.
+    if (segs[i] && !/^v\d+$/i.test(segs[i]) && /[_,-]/.test(segs[i])) {
+      i++;
+    }
+    // Skip version segment if present
+    if (segs[i] && /^v\d+$/i.test(segs[i])) {
+      i++;
+    }
+
+    const publicIdPath = segs.slice(i).join('/');
+    if (!publicIdPath) return null;
+
+    // Remove file extension from the last segment
+    const lastDot = publicIdPath.lastIndexOf('.');
+    const withoutExt = lastDot !== -1 ? publicIdPath.slice(0, lastDot) : publicIdPath;
+
+    return decodeURIComponent(withoutExt);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete an image from Cloudinary.
+ * Provide either a publicId or a Cloudinary URL. URL will be parsed to publicId.
+ *
+ * @param {Object} args
+ * @param {string} [args.publicId]
+ * @param {string} [args.url]
+ * @param {boolean} [args.invalidate=true]
+ * @param {number} [args.timeoutMs=DEFAULT_TIMEOUT_MS]
+ * @param {number} [args.retries=DEFAULT_RETRIES]
+ */
+export async function deleteImage({
+  publicId,
+  url,
+  invalidate = true,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  retries = DEFAULT_RETRIES
+} = {}) {
+  let pid = publicId;
+  if (!pid && url) {
+    pid = parsePublicIdFromUrl(url);
+  }
+  if (!pid) throw new Error('deleteImage: "publicId" or a Cloudinary URL "url" is required');
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await cloudinary.v2.uploader.destroy(pid, {
+        resource_type: 'image',
+        invalidate,
+        timeout: timeoutMs
+      });
+      // Treat "not found" as success (idempotent delete)
+      if (result?.result === 'ok' || result?.result === 'not found') {
+        return result;
+      }
+      // If Cloudinary returns unexpected shape, consider it success
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryable(err)) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('Unknown Cloudinary delete error');
+}
+
+export async function getOrientationByUrl(url, { defaultOrientation = 'auto' } = {}) {
+  try {
+    if (!url) return defaultOrientation;
+    const pid = parsePublicIdFromUrl(url);
+    if (!pid) {
+      try {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          stage: 'frame_mock',
+          event: 'orientation_detected',
+          note: 'no_public_id',
+          host: (() => { try { return new URL(String(url)).host; } catch { return 'invalid'; } })(),
+          returned: defaultOrientation
+        }));
+      } catch {}
+      return defaultOrientation;
+    }
+    const meta = await getImageMetadata(pid, { exif: true, context: false });
+    const w = Number(meta?.width);
+    const h = Number(meta?.height);
+    let ori = defaultOrientation;
+    if (Number.isFinite(w) && Number.isFinite(h)) {
+      // Use a small hysteresis to avoid borderline flips
+      const ratio = h === 0 ? 1 : (w / h);
+      if (ratio >= 1.05) ori = 'horizontal';
+      else if (ratio <= 0.95) ori = 'vertical';
+      else ori = 'horizontal'; // treat near-square as horizontal
+    }
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'frame_mock',
+        event: 'orientation_detected',
+        public_id: pid,
+        width: Number.isFinite(w) ? w : null,
+        height: Number.isFinite(h) ? h : null,
+        returned: ori
+      }));
+    } catch {}
+    return ori;
+  } catch (e) {
+    try {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        stage: 'frame_mock',
+        event: 'orientation_detect_error',
+        message: e?.message || String(e)
+      }));
+    } catch {}
+    return defaultOrientation;
+  }
+}
+
 ================
 File: app/services/framemock.js
 ================
@@ -2760,12 +4150,58 @@ async function postJsonWithRetry(url, body, { timeoutMs, retries = DEFAULT_RETRI
  * @param {{ timeoutMs?: number }} [opts]
  * @returns {Promise<string[]>} Array of mockup image URLs
  */
+export function getFrameUrlsForOrientation(orientation = 'auto') {
+  const o = typeof orientation === 'string' ? orientation.toLowerCase() : 'auto';
+
+  let selected;
+  let kind = 'default';
+
+  if (o === 'horizontal') {
+    selected = {
+      frameUrl1: env.hframeUrl1 || env.frameUrl1,
+      frameUrl2: env.hframeUrl2 || env.frameUrl2,
+      frameUrl3: env.hframeUrl3 || env.frameUrl3,
+    };
+    kind = (env.hframeUrl1 || env.hframeUrl2 || env.hframeUrl3) ? 'horizontal' : 'default';
+  } else if (o === 'vertical') {
+    selected = {
+      frameUrl1: env.vframeUrl1 || env.frameUrl1,
+      frameUrl2: env.vframeUrl2 || env.frameUrl2,
+      frameUrl3: env.vframeUrl3 || env.frameUrl3,
+    };
+    kind = (env.vframeUrl1 || env.vframeUrl2 || env.vframeUrl3) ? 'vertical' : 'default';
+  } else {
+    selected = {
+      frameUrl1: env.frameUrl1,
+      frameUrl2: env.frameUrl2,
+      frameUrl3: env.frameUrl3,
+    };
+    kind = 'default';
+  }
+
+  // Debug log which set was chosen and presence of envs (no URLs printed)
+  try {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      stage: 'frame_mock',
+      event: 'frame_urls_selected',
+      orientation: o,
+      selected_kind: kind,
+      has_h: Boolean(env.hframeUrl1 || env.hframeUrl2 || env.hframeUrl3),
+      has_v: Boolean(env.vframeUrl1 || env.vframeUrl2 || env.vframeUrl3),
+      has_default: Boolean(env.frameUrl1 || env.frameUrl2 || env.frameUrl3),
+    }));
+  } catch {}
+
+  return selected;
+}
+
 export async function createMockups({
   frameUrl1,
   frameUrl2,
   frameUrl3,
   artUrl,
-  orientation = 'horizontal',
+  orientation = 'auto',
   enableInnerShadow = true
 }, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const traceId = randomUUID();
@@ -2781,12 +4217,14 @@ export async function createMockups({
     headers['Authorization'] = `Bearer ${env.frameMockApiKey}`;
   }
 
+  const normalizedOrientation = (['horizontal','vertical','auto'].includes(String(orientation).toLowerCase()) ? String(orientation).toLowerCase() : 'auto');
+
   const payload = {
     frameUrl1,
     frameUrl2,
     frameUrl3,
     artUrl,
-    orientation: orientation || "horizontal",
+    orientation: normalizedOrientation,
     enableInnerShadow: Boolean(enableInnerShadow)
   };
 
@@ -3219,7 +4657,6 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
-    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   try {
@@ -3233,7 +4670,7 @@ export async function chat(system, user, temperature = 0.7, model = 'gpt-4o-mini
       },
       body: JSON.stringify({
         model,
-        temperature,
+        ...( /^gpt-5/.test(model) ? {} : { temperature } ),
         messages: [
           { role: 'system', content: system },
           {
@@ -3291,7 +4728,6 @@ export async function chatJson({
   const endpoint =
     process.env.OPENAI_BASE_URL ||
     env.openaiBaseUrl ||
-    env.paintEndpoint ||
     'https://api.openai.com/v1/chat/completions';
 
   // Helper: tolerant JSON parse (tries to extract a balanced object/array if extra text slips in)
@@ -3341,7 +4777,7 @@ export async function chatJson({
           },
         body: JSON.stringify({
           model,
-          temperature,
+          ...( /^gpt-5/.test(model) ? {} : { temperature } ),
           response_format,
           messages: [
             { role: 'system', content: schema ? `${system}\n\nReturn ONLY minified JSON strictly matching the provided schema.` : `${system}\n\nReturn ONLY minified JSON.` },
@@ -3388,7 +4824,7 @@ export async function chatJson({
   }
 }
 
-export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }) {
+export async function generateImage({ prompt, imageUrl, additionalImageUrls = [], model = "gpt-4o-image" }) {
   const traceId = randomUUID();
   const start = Date.now();
   log({ event: "generateImage_start", traceId, model });
@@ -3397,7 +4833,7 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
   const endpoint =
     process.env.PAINT_ENDPOINT ||
     env.paintEndpoint ||
-    "https://api-direct.piapi.ai/v1/chat/completions";
+    "https://api.piapi.ai/v1/chat/completions";
 
   // Retry/circuit config (override via env)
   const retries = Number(process.env.PIAPI_RETRIES ?? 2);
@@ -3413,7 +4849,7 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
       headers: {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        Authorization: `Bearer ${process.env.PIAPI_API_KEY || env.piapiKey || env.openaiKey}`,
+        Authorization: `Bearer ${process.env.PIAPI_API_KEY || process.env.PAINT_API_KEY || env.piapiKey || env.openaiKey}`,
       },
       body: JSON.stringify({
         model,
@@ -3422,6 +4858,7 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
             role: "user",
             content: [
               ...(imageUrl ? [{ type: "image_url", image_url: { url: imageUrl } }] : []),
+              ...(Array.isArray(additionalImageUrls) ? additionalImageUrls.map(u => ({ type: "image_url", image_url: { url: String(u) } })) : []),
               { type: "text", text: prompt }
             ]
           }
@@ -3511,6 +4948,12 @@ export async function generateImage({ prompt, imageUrl, model = "gpt-4o-image" }
                 }
               }
             }
+
+            // Early return as soon as we have at least one URL — prevents hanging on long streams
+            if (imageUrls.length > 0) {
+              log({ event: "generateImage_first_url", traceId, count: imageUrls.length });
+              return imageUrls;
+            }
           } catch (e) {
             log({ event: "generateImage_chunk_parse_failed", traceId, line: dataStr.slice(0, 200) });
           }
@@ -3561,7 +5004,6 @@ File: app/services/openverse.js
 import fetch from 'node-fetch';
 import { env } from '../config/env.js';
 import { randomUUID } from 'crypto';
-import { rankAndTrim, DEFAULT_RANK_OPTIONS } from './imageRanker.js';
 
 const STAGE = 'openverse_image_search';
 function log(data = {}) {
@@ -3579,7 +5021,7 @@ function log(data = {}) {
 }
 
 /**
- * Search Openverse images, then apply a fast heuristic ranking to return the top-N.
+ * Search Openverse images and return the first top-N results (unranked).
  * Mirrors the interface of google.imageSearch for interchangeability.
  *
  * @param {string} query - Search term.
@@ -3707,29 +5149,17 @@ export async function imageSearch(query, num = 10, options = {}) {
 
     if (all.length === 0) return [];
 
-    if (disableRanking) {
-      const sliced = all.slice(0, target);
-      log({
-        event: 'return_unranked',
-        traceId,
-        count: sliced.length,
-        reason: 'disableRanking',
-      });
-      return sliced;
-    }
-
-    // Rank and trim to top-N using heuristics
-    const ranked = rankAndTrim(all, query, { ...DEFAULT_RANK_OPTIONS, ...rankOptions }, target);
-
+    // Heuristic ranker removed: always return unranked first-N
+    const sliced = all.slice(0, target);
     log({
-      event: 'success_ranked',
+      event: 'return_unranked',
       traceId,
+      count: sliced.length,
+      reason: 'ranking_removed',
       candidate_count: all.length,
-      top_count: ranked.length,
       duration_ms: Date.now() - start,
     });
-
-    return ranked;
+    return sliced;
   } catch (err) {
     log({ event: 'error', traceId, name: err?.name, message: err?.message });
     throw err;
@@ -3856,11 +5286,11 @@ function normalizeImages(images) {
     .filter(Boolean);
 }
 
-export async function createCollection(title, bodyHtml, handle) {
+export async function createCollection(title, bodyHtml, handle, templateSuffix = 'geographic') {
   const traceId = randomUUID();
   log({ event: 'create_collection_start', traceId, title, handle });
 
-  const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle } });
+  const body = JSON.stringify({ custom_collection: { title, body_html: bodyHtml, handle, template_suffix: templateSuffix } });
   const data = await fetchJson('/custom_collections.json', { method: 'POST', body });
   const id = data?.custom_collection?.id;
   log({ event: 'create_collection_response', traceId, hasId: Boolean(id) });
@@ -4047,6 +5477,81 @@ export async function setMetafieldsGraphQL(ownerId, metafields) {
 }
 
 /**
+ * Set a collection's templateSuffix via Admin GraphQL collectionUpdate.
+ *
+ * @param {string} ownerId - GID for the Collection: gid://shopify/Collection/{id}
+ * @param {string} templateSuffix - e.g. 'geographic'
+ * @returns {Promise<Object>} - GraphQL response collectionUpdate payload
+ */
+export async function setCollectionTemplateGraphQL(ownerId, templateSuffix = 'geographic') {
+  if (!ownerId) throw new Error('setCollectionTemplateGraphQL: ownerId is required');
+  const traceId = randomUUID();
+
+  const query = `
+    mutation updateCollection($input: CollectionInput!) {
+      collectionUpdate(input: $input) {
+        collection { id templateSuffix }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = { input: { id: ownerId, templateSuffix } };
+  const body = JSON.stringify({ query, variables });
+  const res = await fetchJson('/graphql.json', { method: 'POST', body });
+
+  const topErrors = Array.isArray(res?.errors)
+    ? res.errors.map(e => ({
+        field: Array.isArray(e?.path) ? e.path.join('.') : undefined,
+        message: e?.message || 'GraphQL error'
+      }))
+    : [];
+
+  if (topErrors.length) {
+    log({ event: 'graphql_collection_update_top_errors', traceId, errors: topErrors });
+    if (env.requireMetafieldsSuccess) {
+      const err = new Error(`Shopify GraphQL errors: ${JSON.stringify(topErrors)}`);
+      err.context = { ownerId, topErrors };
+      throw err;
+    }
+    return { collectionUpdate: { collection: null, userErrors: topErrors } };
+  }
+
+  const out = res?.data?.collectionUpdate || res?.collectionUpdate || res;
+  const userErrors = Array.isArray(out?.userErrors) ? out.userErrors : [];
+
+  log({
+    event: 'graphql_collection_update_res',
+    traceId,
+    templateSuffix,
+    errors: userErrors.map(e => ({ field: e.field, message: e.message })),
+  });
+
+  if (userErrors.length && env.requireMetafieldsSuccess) {
+    const errMsg = JSON.stringify(userErrors);
+    const err = new Error(`Shopify collectionUpdate returned userErrors: ${errMsg}`);
+    err.context = { ownerId, userErrors };
+    throw err;
+  }
+
+  return out;
+}
+
+/**
+ * REST fallback to set a collection's template suffix.
+ * @param {number|string} id - Numeric REST id of the collection
+ * @param {string} templateSuffix
+ */
+export async function updateCollectionTemplateREST(id, templateSuffix = 'geographic') {
+  if (!id) throw new Error('updateCollectionTemplateREST: id is required');
+  const traceId = randomUUID();
+  const body = JSON.stringify({ custom_collection: { template_suffix: templateSuffix } });
+  log({ event: 'rest_update_collection_template', traceId, id, templateSuffix });
+  await fetchJson(`/custom_collections/${id}.json`, { method: 'PUT', body });
+  return true;
+}
+
+/**
  * Fallback: Set product metafields via REST endpoint.
  * @param {number|string} productId
  * @param {Array<{namespace:string,key:string,type:string,value:string}>} metafields
@@ -4085,10 +5590,15 @@ File: app/workflows/artwork.js
 ================
 import db from '../db/client.js';
 import fetch from 'node-fetch';
-import { chat, generateImage } from '../services/openai.js';
+import { chat, chatJson, generateImage } from '../services/openai.js';
 import { createMockups } from '../services/framemock.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
 
 // Read configuration (prefer env helper, fallback to process.env)
 import { env } from '../config/env.js';
@@ -4122,6 +5632,28 @@ export default async function artwork(job) {
   }
   const photo = await db('photos').where({ id: photoId }).first();
   if (!photo || !photo.processed) return;
+
+  let locMeta = {};
+  try {
+    if (photo?.location_id) {
+      const meta = await db('locations as l')
+        .leftJoin('catchments as c', 'c.id', 'l.catchment_id')
+        .where('l.id', photo.location_id)
+        .first([
+          db.raw('l.name as location_name'),
+          db.raw('c.name as catchment_name'),
+          db.raw('c.phrases as catchment_phrases'),
+          db.raw('l.category as location_category')
+        ]);
+      const phrasesArr = Array.isArray(meta?.catchment_phrases) ? meta.catchment_phrases : [];
+      locMeta = {
+        locationName: meta?.location_name || '',
+        catchmentName: meta?.catchment_name || '',
+        locationCategory: meta?.location_category || '',
+        phrases: JSON.stringify(phrasesArr)
+      };
+    }
+  } catch (_) {}
 
   if (!PAINT_ENDPOINT) {
     throw new Error('PAINT_ENDPOINT is not configured');
@@ -4161,13 +5693,31 @@ export default async function artwork(job) {
       throw new Error('PAINT_API_KEY is required for PiAPI endpoint');
     }
 
-    // Fetch enabled style prompts from DB
-    const { getEnabled } = await import('../db/stylePrompts.js');
-    const enabledPrompts = await getEnabled();
-    if (!enabledPrompts || enabledPrompts.length === 0) {
-      console.warn('[artwork] No enabled style prompts found. Skipping paint generation.');
-      return;
-    }
+  // Fetch enabled style prompts: always include 'location'; include 'icon' only for icon photos
+  const { getEnabled } = await import('../db/stylePrompts.js');
+  let enabledPrompts = await getEnabled('location');
+  if (photo.icon === true) {
+    try {
+      const iconPrompts = await getEnabled('icon');
+      if (Array.isArray(iconPrompts) && iconPrompts.length > 0) {
+        enabledPrompts = [...enabledPrompts, ...iconPrompts];
+      }
+    } catch (_) {}
+  }
+
+  // Category filter: only run prompts whose categories include the photo's location category
+  const photoCategory = String(locMeta?.locationCategory || '').trim();
+  enabledPrompts = (enabledPrompts || []).filter(p => {
+    const cats = p?.categories;
+    if (!cats || (Array.isArray(cats) && cats.length === 0)) return true; // unrestricted
+    if (!photoCategory) return false; // no location category -> no restricted prompts
+    return Array.isArray(cats) && cats.includes(photoCategory);
+  });
+
+  if (!enabledPrompts || enabledPrompts.length === 0) {
+    console.warn('[artwork] No enabled style prompts matched photo location category. Skipping paint generation.');
+    return;
+  }
 
     /// Loop for each style prompt, process independently
     let res; // Declare res in the outer scope of the for-loop
@@ -4177,6 +5727,12 @@ export default async function artwork(job) {
       const timeoutId = setTimeout(() => controller.abort(), 310_000);
 
       try {
+        // Interpolate template variables in the style prompt (supports both camelCase and lowercase keys).
+        const resolvedPrompt = applyTemplate(stylePrompt.text, {
+          ...locMeta,
+          locationname: (locMeta && locMeta.locationName) || '',
+          catchmentname: (locMeta && locMeta.catchmentName) || ''
+        });
         if (usePiapi) {
           // --- DEBUG LOGS START ---
           console.log('[artwork][DEBUG] Piapi debug pre-flight:');
@@ -4193,10 +5749,29 @@ export default async function artwork(job) {
           }
           // --- DEBUG LOGS END ---
 // Use updated generateImage helper with both prompt and imageUrl
-          console.log(`[artwork] Calling PiAPI generateImage() with style prompt: ${stylePrompt.text}`);
+          // Parse image URLs embedded in the style prompt and pass them to PiAPI
+          const promptUrlMatches = (resolvedPrompt && resolvedPrompt.match(/https?:\/\/[^\s"'()\\]+/g)) || [];
+          const promptImageUrls = Array.from(new Set(
+            promptUrlMatches.filter(u =>
+              /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u) || /res\.cloudinary\.com/i.test(u)
+            )
+          ));
+          const finalPromptImageUrls = promptImageUrls.filter(u => u !== imageSource);
+
+          // Remove any image URLs from the text prompt to avoid leaking raw links
+          let cleanedPrompt = resolvedPrompt;
+          for (const u of finalPromptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
+          cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+
+          console.log(`[artwork] Calling PiAPI generateImage() with style prompt (cleaned): ${cleanedPrompt}`);
+          if (finalPromptImageUrls.length) {
+            console.log('[artwork] Including prompt image URLs for PiAPI:', finalPromptImageUrls);
+          }
+
           const imageUrls = await generateImage({
-            prompt: stylePrompt.text,
+            prompt: cleanedPrompt,
             imageUrl: imageSource,
+            additionalImageUrls: finalPromptImageUrls,
           });
           let localPromptPaintingUrls = [];
           if (imageUrls && imageUrls.length > 0) {
@@ -4206,14 +5781,14 @@ export default async function artwork(job) {
           }
           res = { status: imageUrls && imageUrls.length > 0 ? 200 : 500, ok: imageUrls && imageUrls.length > 0, body: null, promptPaintingUrls: localPromptPaintingUrls };
         } else {
-          console.log(`[artwork] Sending request to legacy paint service with style prompt: ${stylePrompt.text}`);
+          console.log(`[artwork] Sending request to legacy paint service with style prompt: ${resolvedPrompt}`);
           res = await fetch(PAINT_ENDPOINT, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               ...(PAINT_API_KEY ? { 'Authorization': `Bearer ${PAINT_API_KEY}` } : {})
             },
-            body: JSON.stringify({ image: imageSource, prompt: stylePrompt.text }),
+            body: JSON.stringify({ image: imageSource, prompt: resolvedPrompt }),
             signal: controller.signal
           });
         }
@@ -4251,22 +5826,55 @@ export default async function artwork(job) {
       // Fallback
       if (promptFinalUrls.length === 0) promptFinalUrls = promptPaintingUrls;
 
-      // Description
+      // Description (now JSON: {title, description})
       const mainPaintingUrl = promptFinalUrls[0];
       let description = '';
       if (mainPaintingUrl) {
-        // Load system prompt for artwork description from DB
         const { getByKey } = await import('../db/systemPrompts.js');
         const sysPromptRow = await getByKey('artwork_description_system');
-        const sysPrompt = sysPromptRow?.text;
+        const userPromptRow = await getByKey('artwork_description_user');
+        const defaultUser = 'Describe the colours, medium and vibe of the painting.';
+        const ctx = { imageUrl: String(mainPaintingUrl), ...locMeta };
+        const sysPrompt = applyTemplate(sysPromptRow?.text, ctx);
+        const userPromptTemplate = applyTemplate(userPromptRow?.text || defaultUser, ctx);
+        const instruction = userPromptTemplate.replace('at {url}', '').replace('{url}', '').trim();
+        const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 
         try {
-          description = await chat(
-            sysPrompt,
-            `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
-          );
+          const details = await chatJson({
+            system: `${sysPrompt}\n\nReturn ONLY minified JSON strictly matching the schema.`,
+            user: { text: `Generate an evocative, concise artwork title and ~35-word description for this painting. ${instruction}`, imageUrls: [String(mainPaintingUrl)] },
+            schema: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                description: { type: 'string' }
+              },
+              required: ['title', 'description'],
+              additionalProperties: false
+            },
+            temperature: 0.7,
+            model
+          });
+          if (details && typeof details.title === 'string' && typeof details.description === 'string') {
+            description = JSON.stringify({ title: details.title, description: details.description });
+          } else {
+            throw new Error('chatJson did not return expected fields');
+          }
         } catch (e) {
-          console.warn('[artwork] Failed to generate description for', mainPaintingUrl, e);
+          console.warn('[artwork] Failed to generate JSON details; falling back to text description', e);
+          try {
+            const textDesc = await chat(
+              sysPrompt,
+              { text: instruction, imageUrls: [String(mainPaintingUrl)] },
+              0.7,
+              model
+            );
+            // Fallback: store as plain text; publish.js will handle legacy format
+            description = textDesc;
+          } catch (e2) {
+            console.warn('[artwork] Fallback description failed', e2);
+          }
         }
       } else {
         console.warn('[artwork] No mainPaintingUrl found, skipping description generation.');
@@ -4457,9 +6065,12 @@ export default async function artwork(job) {
     const { getByKey: getSysPrompt } = await import('../db/systemPrompts.js');
     const sysPromptRow2 = await getSysPrompt('artwork_description_system');
     const sysPrompt2 = sysPromptRow2?.text;
+    const userPromptRow2 = await getSysPrompt('artwork_description_user');
+    const userPromptTemplate2 = userPromptRow2?.text || 'Describe the colours, medium and vibe of the painting at {url}';
+    const instruction2 = userPromptTemplate2.replace('at {url}', '').replace('{url}', '').trim();
     const description = await chat(
       sysPrompt2,
-      `Describe the colours, medium and vibe of the painting at ${mainPaintingUrl}`
+      { text: instruction2, imageUrls: [String(mainPaintingUrl)] }
     );
 
     // Mark artwork as completed in tracker
@@ -4544,27 +6155,119 @@ export default async function artwork(job) {
 File: app/workflows/catchment.js
 ================
 import db from '../db/client.js';
-import { chat } from '../services/openai.js';
-import { createCollection } from '../services/shopify.js';
-import { qLocation } from '../queue/queues.js';
+import { chat, chatJson } from '../services/openai.js';
+import { createCollection, setMetafieldsGraphQL, setCollectionTemplateGraphQL, updateCollectionTemplateREST } from '../services/shopify.js';
+import { qLocation, qCatchmentArtwork } from '../queue/queues.js';
 
 import * as google from '../services/google.js';
 import * as openverse from '../services/openverse.js';
-import { getSystemPrompt } from '../db/systemPrompts.js';
+import { getByKey as getSystemPromptRow } from '../db/systemPrompts.js';
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx?.[k] != null ? String(ctx[k]) : ''));
+}
 
 export default async function catchment(job) {
   const { catchmentId, imageSource = 'google' } = job.data;
   const row = await db('catchments').where({ id: catchmentId }).first();
-  if (!row || row.processed) return;
+  if (!row) return;
 
-  const sysPrompt = await getSystemPrompt('catchment_intro_system');
-  const userPromptTemplate = await getSystemPrompt('catchment_intro_user');
-  const userPrompt = userPromptTemplate?.replace('{{catchmentName}}', row.name);
+  const sysRow = await getSystemPromptRow('catchment_intro_system');
+  const userRow = await getSystemPromptRow('catchment_intro_user');
+  const model = sysRow?.model || userRow?.model || 'gpt-4o-mini';
+  const ctx = { catchmentName: row.name, lat: row.lat, lon: row.lon };
+  const sysPrompt = applyTemplate(sysRow?.text, ctx);
+  const userPrompt = applyTemplate(userRow?.text, ctx);
 
   const safeSystem = typeof sysPrompt === 'string' ? sysPrompt : 'You are a helpful assistant.';
   const safeUser = typeof userPrompt === 'string' ? userPrompt : `Write a short introduction for ${row.name}.`;
 
-  const intro50 = row.intro ?? await chat(safeSystem, safeUser);
+  // If already processed but missing phrases, backfill phrases only and exit
+  if (row.processed && (!Array.isArray(row.phrases) || row.phrases.length === 0)) {
+    try {
+      const json = await chatJson({
+        system: safeSystem,
+        user: safeUser,
+        schema: {
+          type: 'object',
+          properties: {
+            blurb: { type: 'string' },
+            latitude: { type: 'number' },
+            longitude: { type: 'number' },
+            phrases: {
+              type: 'array',
+              items: { type: 'string' }
+            }
+          },
+          required: ['blurb', 'latitude', 'longitude', 'phrases'],
+          additionalProperties: false
+        },
+        temperature: 0,
+        model
+      });
+
+      const parsedPhrases = Array.isArray(json?.phrases)
+        ? json.phrases.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim())
+        : [];
+
+      if (parsedPhrases.length) {
+        await db('catchments')
+          .where({ id: catchmentId })
+          .update({ phrases: db.raw('?::jsonb', [JSON.stringify(parsedPhrases)]) });
+      }
+    } catch (e) {
+      // ignore backfill errors; keep existing data
+    }
+    return;
+  }
+
+  let blurb = row.intro;
+let latForMeta = row.lat;
+let lonForMeta = row.lon;
+let phrases = Array.isArray(row?.phrases) ? row.phrases : [];
+
+if (!blurb || !phrases.length) {
+  try {
+    const json = await chatJson({
+      system: safeSystem,
+      user: safeUser,
+      schema: {
+        type: 'object',
+        properties: {
+          blurb: { type: 'string' },
+          latitude: { type: 'number' },
+          longitude: { type: 'number' },
+          phrases: {
+            type: 'array',
+            items: { type: 'string' }
+          }
+        },
+        required: ['blurb', 'latitude', 'longitude', 'phrases'],
+        additionalProperties: false
+      },
+      temperature: 0,
+      model
+    });
+
+    blurb = typeof json?.blurb === 'string' ? json.blurb.trim() : blurb;
+
+    const latParsed = Number(json?.latitude);
+    const lonParsed = Number(json?.longitude);
+    if (Number.isFinite(latParsed)) latForMeta = latParsed;
+    if (Number.isFinite(lonParsed)) lonForMeta = lonParsed;
+
+    const parsedPhrases = Array.isArray(json?.phrases)
+      ? json.phrases.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim())
+      : [];
+    if (parsedPhrases.length) phrases = parsedPhrases;
+
+    if (!blurb) throw new Error('missing blurb');
+  } catch (e) {
+    // Fallback to plain text chat if JSON parsing fails
+    blurb = await chat(safeSystem, safeUser, 0.7, model);
+  }
+}
 
   // Example: perform image search before proceeding (if required by workflow)
   const imageService = imageSource === 'openverse' ? openverse : google;
@@ -4581,15 +6284,302 @@ export default async function catchment(job) {
   }
 
   const handle = row.name.toLowerCase().replace(/\s+/g, '-');
-  const shopifyId = await createCollection(row.name, intro50, handle);
+  const shopifyId = await createCollection(row.name, blurb || safeUser, handle);
+
+  // Ensure collection theme template is 'geographic'
+  try {
+    const collectionOwnerId = `gid://shopify/Collection/${shopifyId}`;
+    const upd = await setCollectionTemplateGraphQL(collectionOwnerId, 'geographic');
+    const applied =
+      upd?.collection?.templateSuffix ||
+      upd?.collectionUpdate?.collection?.templateSuffix ||
+      null;
+
+    if (typeof job.log === 'function') {
+      job.log({ event: 'collection_template_set', ownerId: collectionOwnerId, applied });
+    }
+
+    if (applied !== 'geographic') {
+      await updateCollectionTemplateREST(shopifyId, 'geographic');
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_rest_fallback', id: shopifyId });
+    }
+  } catch (e) {
+    try {
+      await updateCollectionTemplateREST(shopifyId, 'geographic');
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_rest_on_error', id: shopifyId, error: e.message });
+    } catch (e2) {
+      if (typeof job.log === 'function') job.log({ event: 'collection_template_set_error', error: e2.message });
+    }
+  }
+
+// Attach collection metafields for location data (latitude, longitude, city_name)
+try {
+  const ownerId = `gid://shopify/Collection/${shopifyId}`;
+  const meta = [
+    { namespace: 'location', key: 'latitude', type: 'single_line_text_field', value: String(latForMeta) },
+    { namespace: 'location', key: 'longitude', type: 'single_line_text_field', value: String(lonForMeta) },
+    { namespace: 'location', key: 'city_name', type: 'single_line_text_field', value: row.name }
+  ];
+  await setMetafieldsGraphQL(ownerId, meta);
+  if (typeof job.log === 'function') job.log({ event: 'collection_metafields_set', ownerId, meta_count: meta.length });
+} catch (e) {
+  if (typeof job.log === 'function') job.log({ event: 'collection_metafields_error', error: e.message });
+}
 
   await db('catchments').where({ id: catchmentId }).update({
-    intro: intro50,
+    intro: blurb,
     shopify_id: shopifyId,
-    processed: true
+    processed: true,
+    phrases: db.raw('?::jsonb', [JSON.stringify(phrases)])
   });
 
+  // Enqueue catchment-level artwork generation (once per catchment, using catchment lat/lon)
+  try {
+    const jobId = `catchmentArtwork:${catchmentId}`;
+    await qCatchmentArtwork.add('catchmentArtwork', { catchmentId }, { jobId });
+    // Console log for visibility in central logs (job.log writes to BullMQ logs)
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchment', event: 'enqueue_catchment_artwork', catchmentId, jobId })); } catch (_) {}
+  } catch (e) {
+    if (typeof job.log === 'function') job.log({ event: 'enqueue_catchment_artwork_error', error: e.message });
+    try { console.error(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchment', event: 'enqueue_catchment_artwork_error', catchmentId, error: e?.message })); } catch (_) {}
+  }
+
   await qLocation.add('location', { catchmentId, imageSource: row.image_source || imageSource }, { jobId: `location:${catchmentId}` });
+}
+
+================
+File: app/workflows/catchmentArtwork.js
+================
+import db from '../db/client.js';
+import fetch from 'node-fetch';
+import { chat, chatJson, generateImage } from '../services/openai.js';
+import { uploadImage } from '../services/cloudinary.js';
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
+export default async function catchmentArtwork(job) {
+  const { catchmentId } = job.data;
+  if (!catchmentId) return;
+
+  // Load catchment row
+  const c = await db('catchments').where({ id: catchmentId }).first();
+  if (!c) return;
+
+  // Context uses catchment lat/lon
+  const phrasesArr = Array.isArray(c?.phrases) ? c.phrases : [];
+  const phrasesBulleted = phrasesArr
+    .map(p => (typeof p === 'string' ? `- ${p}`.trim() : ''))
+    .filter(Boolean)
+    .join('\n');
+  const ctx = {
+    catchmentName: c.name || '',
+    catchmentname: c.name || '',
+    lat: c.lat,
+    lon: c.lon,
+    // Structured JSON form
+    phrases: JSON.stringify(phrasesArr),
+    // Human-friendly variants
+    phrasesBulleted,
+    phrasesCsv: phrasesArr.filter(p => typeof p === 'string' && p.trim()).join(', ')
+  };
+  try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'ctx_ready', catchmentId, phrases_count: phrasesArr.length })); } catch (_) {}
+
+  // Ensure pseudo-location and pseudo-photo for catchment so we can reuse the unified artwork -> moderation -> publish flow
+  // Pseudo location: one row per catchment (unique by (catchment_id, lower(name)))
+  const pseudoLocationName = `Catchment – ${c.name || ''}`;
+  let pseudoLocation = await db('locations')
+    .where({ catchment_id: catchmentId })
+    .andWhereRaw('lower(name) = lower(?)', [pseudoLocationName])
+    .first();
+
+  if (!pseudoLocation) {
+    try {
+      const insLoc = await db('locations')
+        .insert({
+          catchment_id: catchmentId,
+          name: pseudoLocationName,
+          category: 'catchment',
+          // populate Google-esque lat/lng fields used by publish.js
+          g_lat: c.lat,
+          g_lng: c.lon,
+          processed: true
+        })
+        .returning(['id', 'name']);
+      pseudoLocation = insLoc?.[0] || null;
+    } catch (e) {
+      // Concurrent creation safety: if unique constraint hit, re-select
+      pseudoLocation = await db('locations')
+        .where({ catchment_id: catchmentId })
+        .andWhereRaw('lower(name) = lower(?)', [pseudoLocationName])
+        .first();
+    }
+  }
+
+  if (!pseudoLocation || !pseudoLocation.id) {
+    console.warn('[catchmentArtwork] Failed to ensure pseudo-location for catchment', { catchmentId });
+    return;
+  }
+
+  // Pseudo photo: one row per pseudo-location/catchment
+  const pseudoSrcUrl = `catchment:${catchmentId}`;
+  let pseudoPhoto = await db('photos')
+    .where({ location_id: pseudoLocation.id, src_url: pseudoSrcUrl })
+    .first();
+
+  if (!pseudoPhoto) {
+    try {
+      const insPhoto = await db('photos')
+        .insert({
+          location_id: pseudoLocation.id,
+          src_url: pseudoSrcUrl,
+          kept: true,
+          processed: true
+        })
+        .returning(['id']);
+      pseudoPhoto = insPhoto?.[0] || null;
+    } catch (e) {
+      // Concurrent creation safety: if unique constraint hit, re-select
+      pseudoPhoto = await db('photos')
+        .where({ location_id: pseudoLocation.id, src_url: pseudoSrcUrl })
+        .first();
+    }
+  }
+  const photoId = pseudoPhoto?.id;
+  if (!photoId) {
+    console.warn('[catchmentArtwork] Failed to ensure pseudo-photo for catchment', { catchmentId, locationId: pseudoLocation.id });
+    return;
+  }
+
+  // Fetch enabled catchment-scoped style prompts
+  const { getEnabled } = await import('../db/stylePrompts.js');
+  const prompts = await getEnabled('catchment');
+  try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'prompts_loaded', count: Array.isArray(prompts) ? prompts.length : 0 })); } catch (_) {}
+  if (!prompts || prompts.length === 0) {
+    console.log('[catchmentArtwork] No enabled catchment-scoped style prompts found.');
+    return;
+  }
+
+  // For each style prompt, generate image(s) with PiAPI/OpenAI (no base image; use text + coords)
+  for (const stylePrompt of prompts) {
+    // Resolve and clean prompt; allow image URLs embedded in prompt text as references
+    const resolved = applyTemplate(stylePrompt.text, ctx);
+
+    // Extract any image URLs and strip them from the text so we can pass via additionalImageUrls param
+    const urlMatches = (resolved && resolved.match(/https?:\/\/[^\s"'()\\]+/g)) || [];
+    const promptImageUrls = Array.from(new Set(
+      urlMatches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u) || /res\.cloudinary\.com/i.test(u))
+    ));
+    let cleanedPrompt = resolved;
+    for (const u of promptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
+    cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'prompt_resolved', style_prompt_id: stylePrompt.id, has_refs: promptImageUrls.length > 0, refs_count: promptImageUrls.length, preview: cleanedPrompt.slice(0, 140) })); } catch (_) {}
+
+    let imageUrls = [];
+    try {
+      imageUrls = await generateImage({
+        prompt: cleanedPrompt,
+        imageUrl: null,
+        additionalImageUrls: promptImageUrls
+      });
+    } catch (e) {
+      console.warn('[catchmentArtwork] generateImage failed', { catchmentId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
+      imageUrls = [];
+    }
+
+    // Fallback: reinforce instruction to produce an output image if first attempt returned none
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      try {
+        const reinforced = cleanedPrompt + '\n\nReturn an output image. Do not return text. Provide the final image as an output_image.';
+        const retryUrls = await generateImage({
+          prompt: reinforced,
+          imageUrl: null,
+          additionalImageUrls: promptImageUrls
+        });
+        if (Array.isArray(retryUrls) && retryUrls.length > 0) {
+          imageUrls = retryUrls;
+        }
+      } catch (e2) {
+        console.warn('[catchmentArtwork] generateImage retry failed', { catchmentId, stylePromptId: stylePrompt.id, err: e2 && (e2.message || e2) });
+      }
+    }
+
+    try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'generateImage_result', style_prompt_id: stylePrompt.id, count: Array.isArray(imageUrls) ? imageUrls.length : 0 })); } catch (_) {}
+
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      console.warn('[catchmentArtwork] No image URLs returned for catchment/style', { catchmentId, stylePromptId: stylePrompt.id });
+      continue;
+    }
+
+    // Upload first image to Cloudinary and persist one row per catchment/style (unique constraint)
+    const firstUrl = imageUrls[0];
+    let finalUrl = firstUrl;
+    try {
+      const { secure_url } = await uploadImage(String(firstUrl), {
+        folder: 'art-factory/artwork',
+        publicId: `artwork_${photoId}_${stylePrompt.id}_0`
+      });
+      if (secure_url) finalUrl = secure_url;
+    } catch (e) {
+      console.warn('[catchmentArtwork] Cloudinary upload failed, using original URL', e);
+    }
+
+    // Generate a title/description JSON for the artwork using existing system prompts
+    let description = '';
+    try {
+      const { getByKey } = await import('../db/systemPrompts.js');
+      const sysPromptRow = await getByKey('artwork_description_system');
+      const userPromptRow = await getByKey('artwork_description_user');
+      const defaultUser = 'Describe the colours, medium and vibe of the painting.';
+      const sysPrompt = applyTemplate(sysPromptRow?.text, { imageUrl: String(finalUrl), ...ctx });
+      const userPromptTemplate = applyTemplate(userPromptRow?.text || defaultUser, { imageUrl: String(finalUrl), ...ctx });
+      const instruction = userPromptTemplate.replace('at {url}', '').replace('{url}', '').trim();
+      const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
+
+      const details = await chatJson({
+        system: `${sysPrompt}\n\nReturn ONLY minified JSON strictly matching the schema.`,
+        user: { text: `Generate an evocative, concise artwork title and ~35-word description for this painting. ${instruction}`, imageUrls: [String(finalUrl)] },
+        schema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            description: { type: 'string' }
+          },
+          required: ['title', 'description'],
+          additionalProperties: false
+        },
+        temperature: 0.7,
+        model
+      });
+      if (details && typeof details.title === 'string' && typeof details.description === 'string') {
+        description = JSON.stringify({ title: details.title, description: details.description });
+      }
+    } catch (e) {
+      console.warn('[catchmentArtwork] Description generation failed; storing empty description', e);
+    }
+
+    // Insert into unified artwork table (one per photo/style), idempotent on (photo_id, style_prompt_id)
+    try {
+      const ins = await db('artwork')
+        .insert({
+          photo_id: photoId,
+          style_prompt_id: stylePrompt.id,
+          style_name: stylePrompt.text,
+          image_url: finalUrl,
+          description,
+          approved_for_publish: false
+        })
+        .onConflict(['photo_id', 'style_prompt_id'])
+        .ignore()
+        .returning(['id']);
+      const insertedId = ins?.[0]?.id || null;
+      try { console.log(JSON.stringify({ ts: new Date().toISOString(), stage: 'catchmentArtwork', event: 'artwork_inserted', photo_id: photoId, style_prompt_id: stylePrompt.id, id: insertedId })); } catch (_) {}
+    } catch (e) {
+      console.error('[catchmentArtwork] Insert into artwork failed', { catchmentId, photoId, stylePromptId: stylePrompt.id, err: e && (e.message || e) });
+    }
+  }
 }
 
 ================
@@ -4599,6 +6589,24 @@ import db from '../db/client.js';
 import { chatJson } from '../services/openai.js';
 import { qPhoto } from '../queue/queues.js';
 import { getPlaceDetails } from '../services/google.js';
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
+const ALLOWED_CATEGORIES = [
+  'mountain_hill',
+  'forest_park',
+  'meadow_field',
+  'river_lake_waterfall',
+  'ocean_beach_coast',
+  'village',
+  'city',
+  'industrial',
+  'castle_church_ruin',
+  'other'
+];
 
 const PLACES_SCHEMA = {
   type: 'object',
@@ -4612,7 +6620,7 @@ const PLACES_SCHEMA = {
         properties: {
           name: { type: 'string' },
           address: { type: 'string' },
-          category: { type: 'string' },
+          category: { type: 'string', enum: ALLOWED_CATEGORIES },
           description: { type: 'string' },
           search_term: { type: 'string' },
         },
@@ -4627,10 +6635,12 @@ const PLACES_SCHEMA = {
 function sanitizePlace(p) {
   // Ensure strings; trim; default missing optional fields to ''
   const s = (v) => (typeof v === 'string' ? v.trim() : '');
+  let cat = s(p.category).toLowerCase();
+  if (!ALLOWED_CATEGORIES.includes(cat)) cat = 'other';
   const place = {
     name: s(p.name),
     address: s(p.address),
-    category: s(p.category),
+    category: cat,
     description: s(p.description),
     search_term: s(p.search_term || p.name),
   };
@@ -4647,19 +6657,18 @@ export default async function locations(job) {
   // Load system prompt for location places from DB
   const { getByKey } = await import('../db/systemPrompts.js');
   const sysPromptRow = await getByKey('location_places_system');
-  const system = sysPromptRow?.text;
-
   const { getByKey: getUserPrompt } = await import('../db/systemPrompts.js');
   const userPromptRow = await getUserPrompt('location_places_user');
-  const userTemplate = userPromptRow?.text;
-  const user = userTemplate
-    ?.replace('{{lat}}', catchment.lat)
-    ?.replace('{{lon}}', catchment.lon)
-    ?.replace('{{catchmentName}}', catchment.name);
+
+  const ctx = { lat: catchment.lat, lon: catchment.lon, catchmentName: catchment.name };
+  const system = applyTemplate(sysPromptRow?.text, ctx);
+  const user = applyTemplate(userPromptRow?.text, ctx);
+
+  const model = sysPromptRow?.model || userPromptRow?.model || 'gpt-4o-mini';
 
   let places = [];
   try {
-    const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0 });
+    const raw = await chatJson({ system, user, schema: PLACES_SCHEMA, temperature: 0, model });
     if (!raw || !Array.isArray(raw.places)) {
       console.error('locations workflow: invalid response format', { catchmentId, raw });
       return;
@@ -4735,6 +6744,14 @@ import { imageSearch as openverseImageSearch } from '../services/openverse.js';
 import { chat } from '../services/openai.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qArtwork } from '../queue/queues.js';
+import { env } from '../config/env.js';
+import { randomUUID } from 'crypto';
+import { log } from '../server/utils/logger.js';
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
 
 const KEEP_THRESHOLD = 0.65; // used for non-openverse (google) path
 const OPENVERSE_TOP_N = 20;
@@ -4763,15 +6780,70 @@ function to01(text) {
 
 export default async function photos(job) {
   const { locationId } = job.data;
-  const location = await db('locations').where({ id: locationId }).first();
+  const location = await db('locations as l')
+    .leftJoin('catchments as c', 'c.id', 'l.catchment_id')
+    .where('l.id', locationId)
+    .first([
+      'l.*',
+      db.raw('c.name as c_name'),
+      db.raw('c.openverse_top_n as c_ov_top_n'),
+      db.raw('c.openverse_per_page as c_ov_per_page'),
+      db.raw('c.openverse_max_pages as c_ov_max_pages'),
+      db.raw('c.openverse_params as c_ov_params')
+    ]);
   if (!location || location.processed) return;
 
   const source = location.image_source || 'google';
 
+  // Openverse run tracking for logging
+  let ovRunId = null;
+  let ovModerationEnabledCount = 0;
+  let ovKeptCount = 0;
+  let ovDeletedCount = 0;
+
   let images = [];
   try {
     if (source === 'openverse') {
-      images = await openverseImageSearch(location.search_term, OPENVERSE_TOP_N);
+      ovRunId = randomUUID();
+      try {
+        log({ event: 'openverse_run_start', runId: ovRunId, locationId, search_term: location.search_term });
+      } catch (_) {}
+      // Determine per-catchment Openverse config (fallback to defaults)
+      let topN = OPENVERSE_TOP_N;
+      const nTop = Number(location?.c_ov_top_n);
+      if (Number.isFinite(nTop) && nTop > 0) topN = nTop;
+
+      const ovOptions = {};
+      const perPageN = Number(location?.c_ov_per_page);
+      if (Number.isFinite(perPageN) && perPageN > 0) ovOptions.perPage = perPageN;
+
+      const maxPagesN = Number(location?.c_ov_max_pages);
+      if (Number.isFinite(maxPagesN) && maxPagesN > 0) ovOptions.maxPages = maxPagesN;
+
+      if (location?.c_ov_params && typeof location.c_ov_params === 'object') {
+        ovOptions.openverseParams = location.c_ov_params;
+      }
+
+      try {
+        log({
+          event: 'openverse_run_config',
+          runId: ovRunId,
+          locationId,
+          top_n: topN,
+          options: ovOptions
+        });
+      } catch (_) {}
+
+      images = await openverseImageSearch(location.search_term, topN, ovOptions);
+      try {
+        log({
+          event: 'openverse_run_results',
+          runId: ovRunId,
+          locationId,
+          requested_top_n: topN,
+          returned_count: Array.isArray(images) ? images.length : 0
+        });
+      } catch (_) {}
     } else {
       images = await googleImageSearch(location.search_term, GOOGLE_TOP_N);
     }
@@ -4781,6 +6853,20 @@ export default async function photos(job) {
   }
 
   if (!Array.isArray(images) || images.length === 0) {
+    if (source === 'openverse') {
+      try {
+        log({
+          event: 'openverse_run_summary',
+          runId: ovRunId,
+          locationId,
+          returned_count: 0,
+          moderation_enabled_count: 0,
+          kept_count: 0,
+          deleted_count: 0,
+          ai_review_disabled: env.openverseAiReview === false
+        });
+      } catch (_) {}
+    }
     await db('locations').where({ id: locationId }).update({ processed: true });
     return;
   }
@@ -4789,15 +6875,17 @@ export default async function photos(job) {
     const srcUrl = img?.url || img?.src || '';
     if (!srcUrl) continue;
 
-    // Load prompts once per image (kept here for simplicity)
-    let sysPrompt = '';
-    let userTemplate = '';
+    // Load prompt rows once per image (kept here for simplicity)
+    let sysPromptRow = null;
+    let userPromptRow = null;
+    let modelForScoring = 'gpt-4o-mini';
+    let modelForBinary = 'gpt-4.1-mini';
     try {
       const { getByKey } = await import('../db/systemPrompts.js');
-      const sysPromptRow = await getByKey('photo_scoring_system');
-      sysPrompt = sysPromptRow?.text || '';
-      const userPromptRow = await getByKey('photo_scoring_user');
-      userTemplate = userPromptRow?.text || '';
+      sysPromptRow = await getByKey('photo_scoring_system');
+      userPromptRow = await getByKey('photo_scoring_user');
+      modelForScoring = sysPromptRow?.model || userPromptRow?.model || modelForScoring;
+      modelForBinary = sysPromptRow?.model || userPromptRow?.model || modelForBinary;
     } catch (err) {
       console.warn('photos: failed to load system/user prompts; defaulting', { locationId, err });
       sysPrompt = '';
@@ -4892,6 +6980,24 @@ export default async function photos(job) {
 
       if (!photoRow?.id) continue;
 
+      // If Openverse AI review is disabled, skip classification and queue for moderation
+      if (env.openverseAiReview === false) {
+        try {
+          await db('photos').where({ id: photoRow.id }).update({
+            kept: false,
+            processed: false,
+            score: null,
+          });
+          try {
+            console.log('photos: openverse AI review disabled; queued for moderation', { locationId, photoId: photoRow.id, srcUrl });
+          } catch (_) {}
+        } catch (err) {
+          console.error('photos: failed to mark openverse photo for moderation (AI review disabled)', { locationId, photoId: photoRow.id, err });
+        }
+        try { ovModerationEnabledCount += 1; } catch (_) {}
+        continue;
+      }
+
       // Build user payload: use thumbnail when available; fall back to srcUrl
       const thumbUrl = img?.thumbnail || img?.thumbnail_url || srcUrl;
       try {
@@ -4902,21 +7008,23 @@ export default async function photos(job) {
           used: img?.thumbnail ? 'thumbnail' : (img?.thumbnail_url ? 'thumbnail_url' : 'src_url')
         }));
       } catch (_) {}
-      const userText = typeof userTemplate === 'string'
-        ? userTemplate.replace('{{imageUrl}}', thumbUrl)
-        : '';
+      const ctx = { imageUrl: thumbUrl, locationName: location.name || '', catchmentName: location.c_name || '' };
+      const sysTmpl = sysPromptRow?.text || '';
+      const userTmpl = userPromptRow?.text || '';
+      const systemForThis = applyTemplate(sysTmpl, ctx);
+      const userText = applyTemplate(userTmpl, ctx);
 
       // Classify with gpt-4.1-mini: expect '0' or '1'
       let keep = 0;
       try {
-        const sysForBinary = (typeof sysPrompt === 'string' && sysPrompt.trim())
-          ? `${sysPrompt}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
+        const sysForBinary = (typeof systemForThis === 'string' && systemForThis.trim())
+          ? `${systemForThis}\n\nReturn ONLY a single character: 1 (keep) or 0 (delete).`
           : 'Return ONLY a single character: 1 (keep) or 0 (delete).';
         const result = await chat(
           sysForBinary,
           { imageUrls: [thumbUrl], text: userText },
           0,
-          'gpt-4.1-mini'
+          modelForBinary
         );
         keep = to01(result);
       } catch (err) {
@@ -4933,12 +7041,15 @@ export default async function photos(job) {
               processed: false,
               score: 1,
             });
+            try { ovModerationEnabledCount += 1; } catch (_) {}
           }
           console.log('photos: kept openverse photo', { locationId, photoId: photoRow.id, srcUrl });
+          try { ovKeptCount += 1; } catch (_) {}
         } else {
           // Delete photo row entirely
           await db('photos').where({ id: photoRow.id }).del();
           console.log('photos: deleted openverse photo (classified 0)', { locationId, photoId: photoRow.id, srcUrl });
+          try { ovDeletedCount += 1; } catch (_) {}
         }
       } catch (err) {
         console.error('photos: openverse post-classification update failed', { locationId, photoId: photoRow.id, err });
@@ -4947,13 +7058,17 @@ export default async function photos(job) {
       // NON-OPENVERSE PATH: keep existing behavior (score numeric, threshold)
       let score = 0;
       try {
-        const userPrompt = typeof userTemplate === 'string'
-          ? userTemplate.replace('{{imageUrl}}', srcUrl)
-          : '';
+        const ctx2 = { imageUrl: srcUrl, locationName: location.name || '', catchmentName: location.c_name || '' };
+        const sysTmpl2 = sysPromptRow?.text || '';
+        const userTmpl2 = userPromptRow?.text || '';
+        const systemForThis2 = applyTemplate(sysTmpl2, ctx2);
+        const userPrompt = applyTemplate(userTmpl2, ctx2);
+
         const scoreTxt = await chat(
-          sysPrompt,
+          systemForThis2,
           userPrompt,
-          0
+          0,
+          modelForScoring
         );
         score = clamp01(Number(scoreTxt));
       } catch (err) {
@@ -5004,6 +7119,20 @@ export default async function photos(job) {
   }
 
   // Mark location processed after iterating all images
+  if (source === 'openverse') {
+    try {
+      log({
+        event: 'openverse_run_summary',
+        runId: ovRunId,
+        locationId,
+        returned_count: Array.isArray(images) ? images.length : 0,
+        moderation_enabled_count: ovModerationEnabledCount,
+        kept_count: ovKeptCount,
+        deleted_count: ovDeletedCount,
+        ai_review_disabled: env.openverseAiReview === false
+      });
+    } catch (_) {}
+  }
   await db('locations').where({ id: locationId }).update({ processed: true });
 }
 
@@ -5014,6 +7143,7 @@ import db from '../db/client.js';
 import * as n8n from '../services/n8n.js';
 import { env } from '../config/env.js';
 import { createProductRaw, setMetafieldsGraphQL, setProductMetafieldsREST } from '../services/shopify.js';
+import { chatJson } from '../services/openai.js';
 const { sendProduct } = n8n;
 
 function parseFormattedAddress(addr) {
@@ -5056,7 +7186,8 @@ export default async function publish(job) {
       longitude: 'l.g_lng',
       g_place_id: 'l.g_place_id',
       g_formatted_address: 'l.g_formatted_address',
-      image_source: 'l.image_source'
+      image_source: 'l.image_source',
+      openverse_metadata: 'p.openverse_metadata'
     });
 
   console.log("DEBUG publish: resolved location row", row);
@@ -5065,8 +7196,87 @@ export default async function publish(job) {
     throw new Error(`Unable to resolve location/catchment for photo ${art.photo_id}`);
   }
 
-  const title = `${row.location_name} – Bomberg Series`;
-  const bodyHtml = `${art.description ?? ''}<br><br><em>${row.location_description ?? ''}</em>`;
+  function applyTemplate(str, ctx) {
+    if (typeof str !== 'string') return str;
+    return str.replace(/{{\s*(\w+)\s*}}/g, (_m, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+  }
+  function tryParseArtworkDetails(s) {
+    if (!s || typeof s !== 'string') return null;
+    // First, try strict JSON
+    try {
+      const o = JSON.parse(s);
+      return (o && typeof o.title === 'string') ? o : null;
+    } catch {}
+    // Loose parse: extract the first balanced JSON object and parse that
+    function extractBalancedObject(text) {
+      const start = text.indexOf('{');
+      if (start === -1) return null;
+      let depth = 0;
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) return text.slice(start, i + 1);
+        }
+      }
+      return null;
+    }
+    const snippet = extractBalancedObject(s);
+    if (snippet) {
+      try {
+        const o = JSON.parse(snippet);
+        return (o && typeof o.title === 'string') ? o : null;
+      } catch {}
+    }
+    return null;
+  }
+  function extractTitleLoose(s) {
+    if (!s || typeof s !== 'string') return null;
+    const m = s.match(/"title"\s*:\s*"([^"]{1,256})"/i);
+    if (m && m[1]) return m[1].trim();
+    const m2 = s.match(/^\s*title\s*[:\-]\s*(.+)$/im);
+    if (m2 && m2[1]) return m2[1].trim().replace(/^["'`]|["'`]$/g, '');
+    return null;
+  }
+  const artDetails = tryParseArtworkDetails(art.description);
+  const ctx = { locationName: row.location_name || '' };
+  let title = (artDetails && typeof artDetails.title === 'string' && artDetails.title.trim())
+    ? artDetails.title.trim()
+    : (extractTitleLoose(art.description || '') || `${row.location_name} – Bomberg Series`);
+  const bodyHtml = (artDetails && typeof artDetails.description === 'string')
+    ? (applyTemplate(artDetails.description, ctx) || '')
+    : (art.description ?? '');
+  // Fallback: if we still only have the legacy fallback title, try generating JSON on-the-fly
+  if (!artDetails || !artDetails.title || title === `${row.location_name} – Bomberg Series`) {
+    try {
+      const ai = await chatJson({
+        system: 'Return ONLY minified JSON strictly matching the schema.',
+        user: { text: 'Generate a concise, evocative artwork title and a ~35-word description for this painting image. Return JSON with keys: title (string), description (string).', imageUrls: [String(art.image_url || '')] },
+        schema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            description: { type: 'string' }
+          },
+          required: ['title', 'description'],
+          additionalProperties: false
+        },
+        temperature: 0.7
+      });
+      if (ai && typeof ai.title === 'string') {
+        title = ai.title.trim() || title;
+        const descText = typeof ai.description === 'string' ? ai.description : bodyHtml;
+        bodyHtml = descText;
+        // Persist back to DB so future runs use the JSON
+        try {
+          await db('artwork').where({ id: artworkId }).update({ description: JSON.stringify({ title: title, description: descText }) });
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('publish: chatJson fallback failed', e);
+    }
+  }
 
   // Attempt mockup generation if none exist
   let mockups = [];
@@ -5074,7 +7284,8 @@ export default async function publish(job) {
 
   if (!mu || (Array.isArray(mu) && mu.length === 0) || (typeof mu === 'string' && mu.trim() === '')) {
     try {
-      const { createMockups } = await import('../services/framemock.js');
+      const { createMockups, getFrameUrlsForOrientation } = await import('../services/framemock.js');
+      const { getOrientationByUrl } = await import('../services/cloudinary.js');
       const { frameMockUrl, frameMockApiKey } = (await import('../config/env.js')).env;
       if (!frameMockUrl) {
         console.error('publish: Missing env.frameMockUrl');
@@ -5084,13 +7295,14 @@ export default async function publish(job) {
       }
       if (art.image_url) {
         console.log('publish: Generating mockups for artwork', { artworkId, image_url: art.image_url });
-        const { frameUrl1, frameUrl2, frameUrl3, defaultOrientation } = (await import('../config/env.js')).env;
+        const orientation = await getOrientationByUrl(art.image_url, { defaultOrientation: 'auto' });
+        const { frameUrl1, frameUrl2, frameUrl3 } = getFrameUrlsForOrientation(orientation);
         const generated = await createMockups({
           frameUrl1,
           frameUrl2,
           frameUrl3,
           artUrl: art.image_url,
-          orientation: defaultOrientation || 'horizontal',
+          orientation,
           enableInnerShadow: true
         });
         console.log('publish: Mockups generated', { artworkId, mockupsCount: generated.length });
@@ -5209,6 +7421,46 @@ export default async function publish(job) {
     featured: art.featured || ''
   };
 
+  // Add Openverse copyright metafield into product payload (for n8n or direct REST create)
+  try {
+    const ov = row?.openverse_metadata && typeof row.openverse_metadata === 'object' ? row.openverse_metadata : null;
+    if (row?.image_source === 'openverse' && ov && (ov.license || ov.license_url || ov.creator)) {
+      const code = String(ov.license || '').toLowerCase();
+      const version = ov.license_version || '';
+      const licenseHuman = code === 'cc0'
+        ? `CC0 ${version}`.trim()
+        : `CC ${code.toUpperCase().replace(/-/g, '-')} ${version}`.trim();
+      const assetPage = ov.context || ov.detail_url || ov.url || '';
+      const attribution = [
+        ov.creator ? `Image by ${ov.creator}` : null,
+        licenseHuman || null,
+        ov.license_url || null
+      ].filter(Boolean).join(' • ');
+      const copyright = {
+        source: 'openverse',
+        id: ov.id || null,
+        title: ov.title || null,
+        creator: ov.creator || null,
+        creator_url: ov.creator_url || null,
+        license: licenseHuman || null,
+        license_code: ov.license || null,
+        license_version: ov.license_version || null,
+        license_url: ov.license_url || null,
+        asset_page_url: assetPage || null,
+        provider: ov.provider || null,
+        thumbnail_url: ov.thumbnail || null,
+        attribution,
+        fetched_at: new Date().toISOString()
+      };
+      if (env.createViaN8n) {
+        payload.product.metafields = Array.isArray(payload.product.metafields) ? payload.product.metafields : [];
+        payload.product.metafields.push({ namespace: 'custom', key: 'copyright', type: 'json', value: JSON.stringify(copyright) });
+      }
+    }
+  } catch (e) {
+    console.warn('publish: failed to add copyright metafield to payload', { artworkId, error: e?.message });
+  }
+
   if (env.createViaN8n) {
     try {
       await sendProduct(payload);
@@ -5263,6 +7515,46 @@ export default async function publish(job) {
     const meta = [
       { namespace: 'location', key: 'details', type: 'json', value: JSON.stringify(details) },
     ];
+
+    // Add Openverse copyright metafield when available
+    try {
+      const ov = row?.openverse_metadata && typeof row.openverse_metadata === 'object' ? row.openverse_metadata : null;
+      if (row?.image_source === 'openverse' && ov && (ov.license || ov.license_url || ov.creator)) {
+        const code = String(ov.license || '').toLowerCase();
+        const version = ov.license_version || '';
+        const licenseHuman = code === 'cc0'
+          ? `CC0 ${version}`.trim()
+          : `CC ${code.toUpperCase().replace(/-/g, '-')} ${version}`.trim();
+        const assetPage = ov.context || ov.detail_url || ov.url || '';
+        const attribution = [
+          ov.creator ? `Image by ${ov.creator}` : null,
+          licenseHuman || null,
+          ov.license_url || null
+        ].filter(Boolean).join(' • ');
+
+        const copyright = {
+          source: 'openverse',
+          id: ov.id || null,
+          title: ov.title || null,
+          creator: ov.creator || null,
+          creator_url: ov.creator_url || null,
+          license: licenseHuman || null,
+          license_code: ov.license || null,
+          license_version: ov.license_version || null,
+          license_url: ov.license_url || null,
+          asset_page_url: assetPage || null,
+          provider: ov.provider || null,
+          thumbnail_url: ov.thumbnail || null,
+          attribution,
+          fetched_at: new Date().toISOString()
+        };
+
+        meta.push({ namespace: 'custom', key: 'copyright', type: 'json', value: JSON.stringify(copyright) });
+      }
+    } catch (e) {
+      console.warn('publish: failed to build copyright metafield', { artworkId, error: e?.message });
+    }
+
     const imgs = Array.isArray(created.images) ? created.images : [];
     if (imgs[1]?.src) meta.push({ namespace: 'images', key: 'image2', type: 'single_line_text_field', value: String(imgs[1].src) });
     if (imgs[2]?.src) meta.push({ namespace: 'images', key: 'image3', type: 'single_line_text_field', value: String(imgs[2].src) });
@@ -5302,6 +7594,7 @@ import { env } from './config/env.js';
 import { qCatchment } from './queue/queues.js';
 import { qArtwork } from './queue/queues.js';
 import { qPublish } from './queue/queues.js';
+import { qCatchmentArtwork } from './queue/queues.js';
 import { uploadImage } from './services/cloudinary.js';
 import './queue/workers.js'; // spin up processors
 import { randomUUID } from 'crypto';
@@ -5356,6 +7649,19 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * Mount modular Artwork moderation routes first (UI + API)
+ * These handle:
+ *  - GET /admin/artworks
+ *  - POST /moderate/artwork/:id  (approve/reject with Cloudinary delete + queue removal)
+ *  - GET /admin/moderate-artwork/:catchmentId (enhanced UI with error handling)
+ */
+app.use('/', (await import('./server/routes/moderationArtwork.js')).default);
+app.use('/', (await import('./server/routes/moderationArtworkUI.js')).default);
+// Catchment-level artwork (API + UI)
+app.use('/', (await import('./server/routes/admin/catchmentArtwork.js')).default);
+app.use('/', (await import('./server/routes/moderationCatchmentArtworkUI.js')).default);
+
 // ---------- Moderation UI (Photos by Location: up to 20 images, default PASS, toggle FAIL, Next) ----------
 app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
@@ -5382,6 +7688,9 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;position:relative;outline:2px solid transparent;transition:outline-color .12s ease, transform .06s ease}
   .card:hover{transform:translateY(-1px)}
   .img{width:100%;height:180px;object-fit:cover;display:block;background:#0f1320}
+  .icon-token{position:absolute;left:8px;top:8px;width:28px;height:28px;border-radius:8px;background:rgba(11,13,17,.75);border:1px solid #202636;display:flex;align-items:center;justify-content:center;font-weight:800;color:#d1d5db;z-index:10;cursor:pointer;user-select:none}
+  .card.icon .icon-token{background:rgba(99,102,241,.2);color:#ffd166;border-color:rgba(99,102,241,.5)}
+  .card.fail .icon-token{opacity:.5}
   .meta{padding:10px;display:flex;justify-content:space-between;align-items:center}
   .badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;letter-spacing:.02em}
   .badge.pass{background:rgba(16,185,129,.18);color:#b1f3d9;border:1px solid rgba(16,185,129,.35)}
@@ -5408,6 +7717,7 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
   <div class="row">
     <div class="muted small">Catchment: ${catchmentId}</div>
     <div class="muted small">Location: <span id="locName">…</span></div>
+    <div class="muted small" id="searchTermWrap" style="display:none">Openverse search: <span id="searchTerm">—</span></div>
     <div class="muted small" id="remainingWrap" style="display:none">Remaining in this location: <span id="remaining">0</span></div>
   </div>
   <div style="margin:10px 0">
@@ -5425,7 +7735,7 @@ app.get('/admin/moderate/:catchmentId', async (req, res, next) => {
     <div class="kpis">
       <div class="pill counts"><span class="muted small">Pass</span>&nbsp;<strong id="passCount">0</strong></div>
       <div class="pill counts"><span class="muted small">Fail</span>&nbsp;<strong id="failCount">0</strong></div>
-      <div class="muted small" id="hint">Tap a card to toggle pass/fail</div>
+      <div class="muted small" id="hint">Tap a card to toggle pass/fail • Tap star to mark Icon</div>
     </div>
     <button id="nextBtn" class="btn">Next</button>
   </div>
@@ -5438,6 +7748,8 @@ const grid = document.getElementById('grid');
 const locNameEl = document.getElementById('locName');
 const remainingWrap = document.getElementById('remainingWrap');
 const remainingEl = document.getElementById('remaining');
+const searchTermWrap = document.getElementById('searchTermWrap');
+const searchTermEl = document.getElementById('searchTerm');
 const passCountEl = document.getElementById('passCount');
 const failCountEl = document.getElementById('failCount');
 const nextBtn = document.getElementById('nextBtn');
@@ -5473,11 +7785,12 @@ function cardHTML(p) {
     } catch (_) {}
   }
   return \`
-  <div class="card" id="card-\${p.id}" data-id="\${p.id}">
+  <div class="card\${p.icon ? ' icon' : ''}" id="card-\${p.id}" data-id="\${p.id}">
+    <div class="icon-token" title="Mark as app icon">★</div>
     <div class="strike"></div>
     <img class="img" src="\${src}" alt="" loading="lazy" decoding="async"/>
     <div class="meta">
-      <div class="small muted">score: \${(p.score ?? 0).toFixed ? p.score.toFixed(2) : (p.score || 0)}</div>
+      <div class="small muted">score: \${(typeof p.score === 'number' && Number.isFinite(p.score)) ? p.score.toFixed(2) : ((p.score != null && p.score !== '') ? p.score : 0)}</div>
       <div class="badge pass">PASS</div>
     </div>
   </div>\`;
@@ -5486,6 +7799,14 @@ function cardHTML(p) {
 function render() {
   if (!current.location) return;
   locNameEl.textContent = current.location.name || '—';
+  const st = current.location.search_term || '';
+  if (st) {
+    searchTermWrap.style.display = 'inline-flex';
+    searchTermEl.textContent = st;
+  } else {
+    searchTermWrap.style.display = 'none';
+    searchTermEl.textContent = '—';
+  }
   grid.innerHTML = current.photos.map(cardHTML).join('');
   doneEl.style.display = 'none';
   updateCounts();
@@ -5516,8 +7837,22 @@ function setBadge(card) {
 grid.addEventListener('click', (ev) => {
   const card = ev.target.closest('.card');
   if (!card) return;
+
+  // If clicking the icon token, toggle icon state only
+  if (ev.target.closest('.icon-token')) {
+    const newIcon = !card.classList.contains('icon');
+    card.classList.toggle('icon', newIcon);
+    updateCounts();
+    return;
+  }
+
+  // Otherwise toggle fail on card click
   const willFail = !card.classList.contains('fail');
   card.classList.toggle('fail', willFail);
+  if (willFail) {
+    // Clear icon when marking as fail to avoid confusion
+    card.classList.remove('icon');
+  }
   setBadge(card);
   updateCounts();
 });
@@ -5530,7 +7865,8 @@ nextBtn.addEventListener('click', async () => {
     const decisions = current.photos.map(p => {
       const el = document.getElementById('card-' + p.id);
       const kept = el ? !el.classList.contains('fail') : true;
-      return { id: p.id, kept };
+      const icon = el ? el.classList.contains('icon') : false;
+      return { id: p.id, kept, icon };
     });
     await j('/moderate/location/' + current.location.id, {
       method: 'POST',
@@ -5551,6 +7887,8 @@ nextBtn.addEventListener('click', async () => {
 
 async function loadNext() {
   locNameEl.textContent = '…';
+  searchTermWrap.style.display = 'none';
+  searchTermEl.textContent = '…';
   passCountEl.textContent = '0';
   failCountEl.textContent = '0';
   grid.innerHTML = '';
@@ -5589,6 +7927,7 @@ app.get('/admin/photos', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.ov_id',
         'p.ov_title',
         'p.ov_creator',
@@ -5628,10 +7967,10 @@ app.get('/admin/photos/next', async (req, res, next) => {
         this.select(1)
           .from('photos as p')
           .whereRaw('p.location_id = l.id')
-          .andWhere('p.processed', false);
+          .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); });
       })
       .orderBy('l.created_at', 'asc')
-      .select('l.id', 'l.name')
+      .select('l.id', 'l.name', 'l.search_term')
       .first();
 
     if (!loc) {
@@ -5643,7 +7982,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 
     const photos = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); })
       .orderBy('p.created_at', 'desc')
       .limit(20)
       .select(
@@ -5652,6 +7991,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
         'p.kept',
         'p.score',
         'p.processed',
+        'p.icon',
         'p.ov_id',
         'p.ov_title',
         'p.ov_creator',
@@ -5670,7 +8010,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 
     const remainingRow = await db('photos as p')
       .where('p.location_id', loc.id)
-      .andWhere('p.processed', false)
+      .andWhere(function () { this.where('p.processed', false).orWhereNull('p.processed'); })
       .count({ c: '*' })
       .first();
     const remaining = Number(remainingRow?.c ?? 0);
@@ -5689,7 +8029,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    res.json({ location: { id: loc.id, name: loc.name }, photos, remaining });
+    res.json({ location: { id: loc.id, name: loc.name, search_term: loc.search_term }, photos, remaining });
   } catch (err) {
     next(err);
   }
@@ -5699,6 +8039,7 @@ app.get('/admin/photos/next', async (req, res, next) => {
 app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
   const { id } = req.params;
   const action = (req.body?.action || '').toString();
+  const icon = req.body?.icon === true;
   const t0 = Date.now();
   let uploadedToCloudinary = false;
   let enqueuedArtwork = false;
@@ -5707,7 +8048,7 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
     if (!photo) return res.status(404).json({ error: 'not_found' });
 
     if (action === 'reject') {
-      await db('photos').where({ id }).update({ kept: false, processed: true });
+      await db('photos').where({ id }).update({ kept: false, processed: true, icon: false });
       if (typeof req.log === 'function') {
         req.log({ event: 'moderate_photo', photoId: id, action: 'reject', duration_ms: Date.now() - t0 });
       }
@@ -5716,7 +8057,7 @@ app.post('/moderate/photo/:id', requireApiKey, async (req, res, next) => {
 
     if (action !== 'approve') return res.status(400).json({ error: 'bad_action' });
 
-    await db('photos').where({ id }).update({ kept: true });
+    await db('photos').where({ id }).update({ kept: true, icon });
 
     if (!photo.cloudinary_id || !photo.secure_url) {
       try {
@@ -5760,11 +8101,13 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
     }
 
     const keepMap = new Map();
+    const iconMap = new Map();
     const ids = [];
     for (const d of decisions) {
       if (!d || !d.id) continue;
       ids.push(d.id);
       keepMap.set(d.id, Boolean(d.kept));
+      iconMap.set(d.id, d.icon === true);
     }
     if (ids.length === 0) {
       return res.status(400).json({ error: 'no_ids' });
@@ -5778,22 +8121,28 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
     const validIds = rows.map(r => r.id);
     const approveIds = validIds.filter(id => keepMap.get(id) === true);
     const rejectIds = validIds.filter(id => keepMap.get(id) === false);
+    const iconTrueIds = validIds.filter(id => keepMap.get(id) === true && iconMap.get(id) === true);
 
     let uploadedToCloudinary = 0;
     let enqueuedArtwork = 0;
     let deletedDueToUploadFailure = 0;
 
     if (rejectIds.length > 0) {
-      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true });
+      await db('photos').whereIn('id', rejectIds).update({ kept: false, processed: true, icon: false });
     }
 
     if (approveIds.length > 0) {
       // Mark approvals as kept
-      await db('photos').whereIn('id', approveIds).update({ kept: true });
+      await db('photos').whereIn('id', approveIds).update({ kept: true, icon: false });
 
       const approveRows = rows.filter(r => approveIds.includes(r.id));
       const haveAssets = approveRows.filter(r => r.cloudinary_id && r.secure_url).map(r => r.id);
       const needUpload = approveRows.filter(r => !r.cloudinary_id || !r.secure_url);
+
+      // Set icon=true for requested subset of approved photos
+      if (iconTrueIds.length > 0) {
+        await db('photos').whereIn('id', iconTrueIds).update({ icon: true });
+      }
 
       // Already have assets: mark processed + enqueue
       if (haveAssets.length > 0) {
@@ -5834,6 +8183,7 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
         uploadedToCloudinary,
         enqueuedArtwork,
         deletedDueToUploadFailure,
+        iconTrue: iconTrueIds.length,
         duration_ms: Date.now() - t0
       });
     }
@@ -5851,7 +8201,7 @@ app.post('/moderate/location/:locationId', requireApiKey, async (req, res, next)
   }
 });
 
-// ---------- Artwork Moderation UI ----------
+ // ---------- Artwork Moderation UI ----------
 app.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   const { catchmentId } = req.params;
   try {
@@ -5862,117 +8212,279 @@ app.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Moderate Artwork</title>
 <style>
-  body{margin:0;background:#0b0d11;color:#e7ecf3;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-  .wrap{max-width:1080px;margin:20px auto;padding:0 16px}
-  h1{font-size:18px;margin:12px 0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
-  .card{background:#151922;border:1px solid #202636;border-radius:12px;overflow:hidden}
-  .img{width:100%;height:220px;object-fit:cover;display:block;background:#0f1320}
-  .meta{padding:10px}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  button{background:#6aa4ff;border:0;border-radius:8px;color:#fff;padding:8px 10px;font-weight:600;cursor:pointer}
-  .reject{background:#ef4444}
-  input{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:#e7ecf3;padding:8px;margin-bottom:8px}
-  .muted{color:#9aa4b2}
-</style>
-<div class="wrap">
-  <h1>Moderate Artwork</h1>
-  <div class="muted">Catchment: ${catchmentId}</div>
-  <div style="max-width:420px;margin:10px 0">
-    <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)"/>
-  </div>
-  <div id="grid" class="grid"></div>
-</div>
-<script>
-const apiKeyInput = document.getElementById('apiKey');
-const grid = document.getElementById('grid');
-async function j(u, opt){ const r = await fetch(u, opt); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function load(){
-  const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
-  grid.innerHTML='';
-  for(const a of data.artworks){
-    const card=document.createElement('div'); card.className='card';
-    const mock = Array.isArray(a.mockup_urls)&&a.mockup_urls.length?a.mockup_urls[0]:null;
-    card.innerHTML = \`
-      <img class="img" src="\${mock||a.image_url}" alt=""/>
-      <div class="meta">
-        <div class="row"><div>\${a.location_name||''}</div></div>
-        <div class="row">
-          <button data-act="approve" data-id="\${a.id}">Approve</button>
-          <button class="reject" data-act="reject" data-id="\${a.id}">Reject</button>
-        </div>
-      </div>\`;
-    grid.appendChild(card);
+  :root{
+    --bg:#0b0d11; --panel:#11151c; --panel2:#151922; --border:#202636; --muted:#9aa4b2;
+    --fg:#e7ecf3; --blue:#6aa4ff; --red:#ef4444; --green:#22c55e; --shadow:0 10px 30px rgba(0,0,0,.4);
   }
-}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;overscroll-behavior:none}
+  button{background:var(--blue);border:0;border-radius:10px;color:#fff;padding:12px 16px;font-weight:700;cursor:pointer}
+  button.fail{background:var(--red)}
+  button:active{transform:translateY(1px)}
+  input{background:#0f1320;border:1px solid #283044;border-radius:8px;color:var(--fg);padding:8px}
+  .topbar{
+    position:fixed;inset:0 0 auto 0;height:56px;display:flex;align-items:center;gap:12px;
+    background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);
+    padding:8px 14px;z-index:40;backdrop-filter:saturate(120%) blur(6px);border-bottom:1px solid rgba(32,38,54,.5)
+  }
+  .title{font-size:14px;font-weight:700;opacity:.9}
+  .muted{color:var(--muted)}
+  .grow{flex:1}
+  .viewer{
+    position:fixed;inset:56px 0 90px 0; /* below topbar, above controls */
+    display:flex;align-items:center;justify-content:center;overflow:hidden
+  }
+  #artImg{
+    max-width:100vw;max-height:calc(100vh - 146px); /* 56 topbar + 90 controls */
+    object-fit:contain;display:block;background:#0f1320;border-radius:14px;box-shadow:var(--shadow)
+  }
+  .controls{
+    position:fixed;inset:auto 0 0 0;height:90px;display:flex;align-items:center;justify-content:center;gap:12px;
+    background:linear-gradient(0deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);z-index:30;border-top:1px solid rgba(32,38,54,.5)
+  }
+  .pill{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:var(--muted)}
+  .metaRow{position:fixed;left:12px;bottom:96px;color:var(--muted);font-size:12px;z-index:20}
+  .photoContainer{
+    position:fixed;top:10px;right:10px;z-index:50;display:none; /* toggled via JS */
+  }
+  .photoContainer img{
+    display:block;width:160px;height:160px;object-fit:cover;border-radius:12px;border:1px solid var(--border);box-shadow:var(--shadow);background:#0f1320
+  }
+  /* Invisible hot corner to toggle photo visibility */
+  .hotCorner{
+    position:fixed;top:0;right:0;width:160px;height:160px;z-index:60;background:transparent;cursor:pointer;
+  }
+  .toast{
+    position:fixed;right:12px;bottom:102px;background:#1b2230;border:1px solid #2c3650;color:#e7ecf3;border-radius:10px;padding:10px 12px;z-index:70;
+    display:none;max-width:60vw;box-shadow:var(--shadow);font-size:12px
+  }
+  .empty{
+    position:fixed;inset:56px 0 0 0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:16px
+  }
+</style>
 
-grid.addEventListener('click', async (ev)=>{
-  const btn = ev.target.closest('button'); if(!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  try{
-    await fetch('/moderate/artwork/'+id, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-api-key': apiKeyInput.value || '' }, body: JSON.stringify({ action: act }) });
-    await load();
-  }catch(e){ alert(e.message); }
-});
+<div class="topbar">
+  <div class="title">Moderate Artwork</div>
+  <div class="pill">Catchment: ${catchmentId}</div>
+  <div id="location" class="pill">—</div>
+  <div class="grow"></div>
+  <input id="apiKey" placeholder="x-api-key (required if INGEST_KEY set)" style="min-width:260px"/>
+</div>
 
-load();
+<div id="viewer" class="viewer">
+  <img id="artImg" alt="Artwork"/>
+  <div id="photoContainer" class="photoContainer" aria-hidden="true" tabindex="-1">
+    <img id="photoThumb" alt="Source photo (Openverse thumbnail)"/>
+  </div>
+  <div id="hotCorner" class="hotCorner" title="Toggle source photo (z)"></div>
+</div>
+
+<div class="controls">
+  <button id="passBtn">Pass (p)</button>
+  <button id="failBtn" class="fail">Fail (f)</button>
+  <div id="count" class="pill" style="margin-left:16px">0 / 0</div>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="empty" class="empty" style="display:none">No pending artwork. Try again later.</div>
+
+<script>
+(function(){
+  const apiKeyInput = document.getElementById('apiKey');
+  const artImg = document.getElementById('artImg');
+  const locationEl = document.getElementById('location');
+  const countEl = document.getElementById('count');
+  const passBtn = document.getElementById('passBtn');
+  const failBtn = document.getElementById('failBtn');
+  const toast = document.getElementById('toast');
+  const photoContainer = document.getElementById('photoContainer');
+  const photoThumb = document.getElementById('photoThumb');
+  const hotCorner = document.getElementById('hotCorner');
+  const emptyEl = document.getElementById('empty');
+
+  const PRELOAD_AHEAD = 5;
+
+  let items = [];
+  let idx = 0;
+  let showPhoto = false;
+  const cache = new Map(); // id -> { art: Image, thumb: Image }
+
+  function showToast(msg){
+    toast.textContent = msg;
+    toast.style.display='block';
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(()=>{ toast.style.display='none'; }, 3000);
+  }
+
+  function j(u, opt){ return fetch(u, opt).then(async r => { if(!r.ok){ const t = await r.text().catch(()=>r.statusText); throw new Error(t || ('HTTP '+r.status)); } return r.json(); }); }
+
+  function safeParseJson(v){
+    if (Array.isArray(v)) return v;
+    if (!v) return [];
+    try { const x = JSON.parse(v); return Array.isArray(x) ? x : []; } catch(e){ return []; }
+  }
+
+  function displayUrl(a){
+    const mocks = safeParseJson(a.mockup_urls);
+    const mock = mocks.length ? mocks[0] : null;
+    return mock || a.image_url;
+  }
+
+  function ensureCache(a){
+    let c = cache.get(a.id);
+    if (!c) { c = {}; cache.set(a.id, c); }
+    if (!c.art){
+      const img = new Image();
+      img.decoding = 'async';
+      img.loading = 'eager';
+      img.src = displayUrl(a);
+      c.art = img;
+    }
+    if (a.photo_thumbnail_url && !c.thumb){
+      const t = new Image();
+      t.decoding = 'async';
+      t.loading = 'eager';
+      t.src = a.photo_thumbnail_url;
+      c.thumb = t;
+    }
+    return c;
+  }
+
+  function preloadAhead(startIndex){
+    for (let i = startIndex; i < Math.min(items.length, startIndex + PRELOAD_AHEAD + 1); i++){
+      ensureCache(items[i]);
+    }
+  }
+
+  function render(){
+    const total = items.length;
+    if (total === 0){
+      emptyEl.style.display = 'flex';
+      document.body.classList.add('empty-state');
+      artImg.removeAttribute('src');
+      locationEl.textContent = '—';
+      countEl.textContent = '0 / 0';
+      photoContainer.style.display = 'none';
+      return;
+    }
+    emptyEl.style.display = 'none';
+
+    const a = items[idx];
+    const c = cache.get(a.id);
+    const src = (c && c.art && c.art.complete) ? c.art.src : displayUrl(a);
+    if (artImg.src !== src){
+      artImg.src = src;
+    }
+    locationEl.textContent = a.location_name || '—';
+    countEl.textContent = (idx + 1) + ' / ' + total;
+
+    if (showPhoto && a.photo_thumbnail_url){
+      if (!photoThumb.src || photoThumb.src !== a.photo_thumbnail_url){
+        const ct = cache.get(a.id);
+        photoThumb.src = (ct && ct.thumb) ? ct.thumb.src : a.photo_thumbnail_url;
+      }
+      photoContainer.style.display = 'block';
+      photoContainer.setAttribute('aria-hidden','false');
+    } else {
+      photoContainer.style.display = 'none';
+      photoContainer.setAttribute('aria-hidden','true');
+    }
+  }
+
+  function advance(){
+    if (idx < items.length - 1){
+      idx++;
+      preloadAhead(idx);
+      render();
+    } else {
+      // End of queue
+      showToast('All done');
+      idx = items.length - 1;
+      render();
+    }
+  }
+
+  async function act(action){
+    const a = items[idx];
+    if (!a) return;
+    // Optimistic advance before network
+    const curId = a.id;
+    advance();
+
+    const headers = { 'Content-Type':'application/json' };
+    const key = apiKeyInput.value.trim();
+    if (key) headers['x-api-key'] = key;
+
+    try {
+      await fetch('/moderate/artwork/' + curId, {
+        method:'POST',
+        headers,
+        body: JSON.stringify({ action })
+      });
+    } catch (e) {
+      // Non-blocking error
+      showToast('Failed to ' + (action==='approve'?'pass':'fail') + ' id ' + curId + ': ' + (e.message || 'error'));
+    }
+  }
+
+  function togglePhoto(){
+    showPhoto = !showPhoto;
+    render();
+  }
+
+  function bindHotkeys(){
+    document.addEventListener('keydown', (ev)=>{
+      const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      if (ev.key === 'p' || ev.key === 'P'){ ev.preventDefault(); act('approve'); }
+      if (ev.key === 'f' || ev.key === 'F'){ ev.preventDefault(); act('reject'); }
+      if (ev.key === 'z' || ev.key === 'Z'){ ev.preventDefault(); togglePhoto(); }
+    });
+  }
+
+  function persistApiKey(){
+    const saved = localStorage.getItem('xApiKey') || '';
+    if (saved) apiKeyInput.value = saved;
+    apiKeyInput.addEventListener('input', ()=>{
+      localStorage.setItem('xApiKey', apiKeyInput.value || '');
+    });
+  }
+
+  async function load(){
+    try{
+      const data = await j('/admin/artworks?catchmentId=${catchmentId}&status=pending');
+      items = Array.isArray(data.artworks) ? data.artworks : [];
+      idx = 0;
+      if (items.length > 0){
+        // seed cache and preload
+        ensureCache(items[0]);
+        preloadAhead(0);
+      }
+      render();
+    }catch(e){
+      showToast('Failed to load artworks: ' + e.message);
+      items = [];
+      idx = 0;
+      render();
+    }
+  }
+
+  // Wire up
+  passBtn.addEventListener('click', ()=> act('approve'));
+  failBtn.addEventListener('click', ()=> act('reject'));
+  hotCorner.addEventListener('click', togglePhoto);
+
+  bindHotkeys();
+  persistApiKey();
+  load();
+})();
 </script>
 </html>`);
   } catch (err) { next(err); }
 });
 
-// ---------- List artworks for moderation ----------
-app.get('/admin/artworks', async (req, res, next) => {
-  const t0 = Date.now();
-  try {
-    const { catchmentId, status = 'pending' } = req.query;
-    if (!catchmentId) return res.status(400).json({ error: 'missing_catchmentId' });
-    const rows = await db('artwork as a')
-      .join('photos as p', 'p.id', 'a.photo_id')
-      .join('locations as l', 'l.id', 'p.location_id')
-      .select(
-        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
-        'p.id as photo_id','l.name as location_name'
-      )
-      .where('l.catchment_id', catchmentId)
-      .modify(qb => {
-        if (status === 'pending') {
-          qb.where('a.published', false)
-            .andWhere(inner => {
-              inner.where('a.approved_for_publish', false).orWhereNull('a.approved_for_publish');
-            });
-        }
-        if (status === 'approved') qb.where('a.approved_for_publish', true);
-        if (status === 'rejected') qb.where('a.approved_for_publish', false).whereNotNull('a.moderated_at');
-      })
-      .orderBy('a.id','desc')
-      .limit(200);
-    if (typeof req.log === 'function') req.log({ event: 'admin_artworks', catchmentId, rows: rows.length, duration_ms: Date.now() - t0 });
-    res.json({ artworks: rows });
-  } catch (err) { next(err); }
-});
 
-// ---------- Moderate generated artwork ----------
-app.post('/moderate/artwork/:id', requireApiKey, async (req, res, next) => {
-  const { id } = req.params;
-  const { action } = req.body || {};
-  const t0 = Date.now();
-  try {
-    if (!['approve','reject'].includes(String(action))) return res.status(400).json({ error: 'bad_action' });
-
-    if (action === 'reject') {
-      await db('artwork').where({ id }).update({ approved_for_publish: false, moderated_at: db.fn.now() });
-      if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'reject', duration_ms: Date.now() - t0 });
-      return res.json({ ok: true, status: 'rejected' });
-    }
-
-    await db('artwork').where({ id }).update({ approved_for_publish: true, moderated_at: db.fn.now() });
-    await qPublish.add('publish', { artworkId: id }, { jobId: `publish:${id}` });
-    if (typeof req.log === 'function') req.log({ event: 'moderate_artwork', artworkId: id, action: 'approve', enqueuedPublish: true, duration_ms: Date.now() - t0 });
-    res.json({ ok: true, status: 'approved' });
-  } catch (err) { next(err); }
-});
 
 // ---------- Operator UI (no build step) ----------
 app.get('/', (_req, res) => {
@@ -6037,6 +8549,27 @@ app.get('/', (_req, res) => {
           <option value="google" selected>Google</option>
           <option value="openverse">Openverse</option>
         </select>
+        <div id="ovCfg" style="display:none;margin:8px 0 0 0">
+          <div class="small muted" style="margin-bottom:6px">Openverse search options</div>
+          <div class="row" style="gap:8px">
+            <div style="flex:1">
+              <label>Top N</label>
+              <input id="ovTopN" placeholder="20"/>
+            </div>
+            <div style="flex:1">
+              <label>Per Page</label>
+              <input id="ovPerPage" placeholder="50"/>
+            </div>
+            <div style="flex:1">
+              <label>Max Pages</label>
+              <input id="ovMaxPages" placeholder="5"/>
+            </div>
+          </div>
+          <label>license_type (comma-separated)</label>
+          <input id="ovLicenseType" placeholder="commercial,modification"/>
+          <label>Extra params (JSON, optional)</label>
+          <textarea id="ovExtraParams" rows="2" placeholder='{"aspect_ratio":"wide"}'></textarea>
+        </div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button id="kick">Create Catchment</button>
           <button id="refresh" type="button">Refresh</button>
@@ -6076,6 +8609,13 @@ app.get('/', (_req, res) => {
     const tblBody = document.querySelector('#tbl tbody');
     const lastUpdated = $('#lastUpdated');
     const envHint = $('#envHint');
+    const imageSourceSel = document.getElementById('imageSource');
+    const ovCfg = document.getElementById('ovCfg');
+    const ovTopN = document.getElementById('ovTopN');
+    const ovPerPage = document.getElementById('ovPerPage');
+    const ovMaxPages = document.getElementById('ovMaxPages');
+    const ovLicenseType = document.getElementById('ovLicenseType');
+    const ovExtraParams = document.getElementById('ovExtraParams');
 
     async function json(url, opts={}){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
@@ -6124,6 +8664,13 @@ app.get('/', (_req, res) => {
       }catch(e){ msg.textContent = 'Load failed: ' + e.message; }
     }
 
+    // Toggle OV config visibility
+    function updateOvVisibility(){
+      ovCfg.style.display = (imageSourceSel.value === 'openverse') ? 'block' : 'none';
+    }
+    imageSourceSel.addEventListener('change', updateOvVisibility);
+    updateOvVisibility();
+
     // Realtime updates via SSE
     try {
       const es = new EventSource('/events');
@@ -6153,13 +8700,35 @@ app.get('/', (_req, res) => {
     $('#kick').addEventListener('click', async ()=>{
       msg.textContent = '';
       try{
+        const imgSrc = imageSourceSel.value;
         const body = {
           name: nameInput.value.trim(),
           lat: Number(latInput.value),
           lon: Number(lonInput.value),
-          intro: introInput.value.trim() || undefined,
-          imageSource: document.getElementById('imageSource').value
+          intro: (introInput.value || '').trim() || undefined,
+          imageSource: imgSrc
         };
+        if (imgSrc === 'openverse') {
+          // Optional Openverse tuning from UI
+          const nTop = Number(ovTopN.value);
+          const nPer = Number(ovPerPage.value);
+          const nMax = Number(ovMaxPages.value);
+          if (Number.isFinite(nTop) && nTop > 0) body.openverseTopN = nTop;
+          if (Number.isFinite(nPer) && nPer > 0) body.openversePerPage = nPer;
+          if (Number.isFinite(nMax) && nMax > 0) body.openverseMaxPages = nMax;
+
+          let params = {};
+          const lic = (ovLicenseType.value || '').trim();
+          if (lic) params.license_type = lic;
+          try {
+            const extra = (ovExtraParams.value || '').trim();
+            if (extra) {
+              const parsed = JSON.parse(extra);
+              if (parsed && typeof parsed === 'object') params = { ...params, ...parsed };
+            }
+          } catch (_) { /* ignore malformed JSON */ }
+          if (Object.keys(params).length > 0) body.openverseParams = params;
+        }
         const r = await fetch('/catchments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-api-key': apiKeyInput.value || '' },
@@ -6319,8 +8888,25 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
       ? req.body.imageSource
       : 'google';
 
+    // Optional Openverse config from UI
+    const ovTopN = Number(req.body?.openverseTopN);
+    const ovPerPage = Number(req.body?.openversePerPage);
+    const ovMaxPages = Number(req.body?.openverseMaxPages);
+    let ovParams = {};
+    if (req.body?.openverseParams && typeof req.body.openverseParams === 'object') {
+      ovParams = req.body.openverseParams;
+    }
+
+    const payload = { name, lat, lon, intro, image_source };
+    if (image_source === 'openverse') {
+      if (Number.isFinite(ovTopN) && ovTopN > 0) payload.openverse_top_n = ovTopN;
+      if (Number.isFinite(ovPerPage) && ovPerPage > 0) payload.openverse_per_page = ovPerPage;
+      if (Number.isFinite(ovMaxPages) && ovMaxPages > 0) payload.openverse_max_pages = ovMaxPages;
+      if (ovParams && Object.keys(ovParams).length > 0) payload.openverse_params = ovParams;
+    }
+
     const insert = await db('catchments')
-      .insert({ name, lat, lon, intro, image_source })
+      .insert(payload)
       .returning(['id']);
     const id = insert?.[0]?.id;
     if (!id) throw new Error('Failed to create catchment');
@@ -6341,12 +8927,18 @@ app.post('/catchments', requireApiKey, rateLimit, async (req, res, next) => {
 app.post('/requeue/:stage/:id', requireApiKey, async (req, res) => {
   const { stage, id } = req.params;
   switch (stage) {
-    case 'catchment':
-      await qCatchment.add('catchment', { catchmentId: id }, { jobId: `catchment:${id}` });
-      if (typeof req.log === 'function') {
-        req.log({ event: 'requeue', stage: 'catchment', id, jobId: `catchment:${id}` });
-      }
+    case 'catchment': {
+      const jobId = `catchment:${id}`;
+      await qCatchment.add('catchment', { catchmentId: id }, { jobId });
+      if (typeof req.log === 'function') req.log({ event: 'requeue', stage: 'catchment', id, jobId });
       break;
+    }
+    case 'catchmentArtwork': {
+      const jobId = `catchmentArtwork:${id}`;
+      await qCatchmentArtwork.add('catchmentArtwork', { catchmentId: id }, { jobId });
+      if (typeof req.log === 'function') req.log({ event: 'requeue', stage: 'catchmentArtwork', id, jobId });
+      break;
+    }
     default:
       return res.status(400).send('bad stage');
   }
@@ -6631,6 +9223,10 @@ In essence, the application automates the entire process from defining a geograp
 
     # Optional: custom port (defaults to 3000)
     PORT=3003
+
+    # Feature flags
+    # When false, Openverse photos are not sent to OpenAI review and all are queued for manual moderation
+    OPENVERSE_AI_REVIEW=true
     ```
 
 ### Resilience and Queue Backoff

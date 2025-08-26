@@ -13,6 +13,12 @@ const ALLOWED_CATEGORIES = [
   'other'
 ];
 
+const ALLOWED_PROVIDERS = ['piapi', 'gemini'];
+function normalizeProvider(p) {
+  const s = typeof p === 'string' ? p.trim().toLowerCase() : '';
+  return ALLOWED_PROVIDERS.includes(s) ? s : 'piapi';
+}
+
 function normalizeCategories(input) {
   if (input == null || input === '') return null;
   let arr = input;
@@ -41,11 +47,12 @@ export async function getAll() {
   return db('style_prompts').orderBy('id', 'asc');
 }
 
-export async function createPrompt(text, enabled = true, model = null, scope = 'location', categories = null) {
+export async function createPrompt(text, enabled = true, model = null, scope = 'location', categories = null, provider = 'piapi') {
   const insertData = {
     text,
     enabled,
-    scope: (typeof scope === 'string' && scope.trim()) ? scope.trim() : 'location'
+    scope: (typeof scope === 'string' && scope.trim()) ? scope.trim() : 'location',
+    provider: normalizeProvider(provider),
   };
   if (model != null && typeof model === 'string' && model.trim()) {
     insertData.model = model.trim();
@@ -60,7 +67,7 @@ export async function createPrompt(text, enabled = true, model = null, scope = '
   return prompt;
 }
 
-export async function updatePrompt(id, text, model, scope, categories) {
+export async function updatePrompt(id, text, model, scope, categories, provider) {
   const patch = { updated_at: db.fn.now() };
   if (typeof text === 'string') patch.text = text;
   if (model !== undefined) {
@@ -81,6 +88,9 @@ export async function updatePrompt(id, text, model, scope, categories) {
   if (categories !== undefined) {
     const normCats = normalizeCategories(categories);
     patch.categories = normCats; // null clears restriction
+  }
+  if (provider !== undefined) {
+    patch.provider = normalizeProvider(provider);
   }
   const [prompt] = await db('style_prompts')
     .where({ id })

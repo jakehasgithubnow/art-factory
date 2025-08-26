@@ -67,6 +67,13 @@ export const env = {
   // Paint service
   paintEndpoint: optional('PAINT_ENDPOINT'),
 
+  // OpenRouter (Gemini)
+  openRouterKey: optional('OPENROUTER_API_KEY'),
+  openRouterModel: optional('OPENROUTER_MODEL', 'google/gemini-2.5-flash-image-preview'),
+  openRouterBaseUrl: optional('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+  openRouterSiteUrl: optional('OPENROUTER_SITE_URL'),
+  openRouterSiteName: optional('OPENROUTER_SITE_NAME'),
+
   // Shopify
   shop: optional('SHOPIFY_SHOP'),
   shopToken: optional('SHOPIFY_ACCESS_TOKEN'),

@@ -4,6 +4,7 @@ import { chat, chatJson, generateImage } from '../services/openai.js';
 import { createMockups } from '../services/framemock.js';
 import { uploadImage } from '../services/cloudinary.js';
 import { qPublish } from '../queue/queues.js';
+import { generateImageWithGemini } from '../services/openrouter.js';
 
 function applyTemplate(str, ctx) {
   if (typeof str !== 'string') return str;
@@ -66,7 +67,7 @@ export default async function artwork(job) {
   } catch (_) {}
 
   if (!PAINT_ENDPOINT) {
-    throw new Error('PAINT_ENDPOINT is not configured');
+    console.warn('PAINT_ENDPOINT is not configured; PiAPI/legacy paint disabled. Gemini provider will still run.');
   }
 
   try {
@@ -135,6 +136,8 @@ export default async function artwork(job) {
       const controller = new AbortController();
       // PiAPI can take up to 300s – set generous timeout
       const timeoutId = setTimeout(() => controller.abort(), 310_000);
+      // Track provider across try/finally scope
+      let providerName = 'piapi';
 
       try {
         // Interpolate template variables in the style prompt (supports both camelCase and lowercase keys).
@@ -143,7 +146,41 @@ export default async function artwork(job) {
           locationname: (locMeta && locMeta.locationName) || '',
           catchmentname: (locMeta && locMeta.catchmentName) || ''
         });
-        if (usePiapi) {
+        const provider = String(stylePrompt?.provider || 'piapi').toLowerCase();
+        providerName = provider;
+        if (provider === 'gemini') {
+          // Parse image URLs embedded in the style prompt and pass them to Gemini
+          const promptUrlMatches = (resolvedPrompt && resolvedPrompt.match(/https?:\/\/[^\s"'()\\]+/g)) || [];
+          const promptImageUrls = Array.from(new Set(
+            promptUrlMatches.filter(u =>
+              /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u) || /res\.cloudinary\.com/i.test(u)
+            )
+          ));
+          const finalPromptImageUrls = promptImageUrls.filter(u => u !== imageSource);
+
+          // Remove any image URLs from the text prompt to avoid leaking raw links
+          let cleanedPrompt = resolvedPrompt;
+          for (const u of finalPromptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
+          cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+
+          console.log(`[artwork] Calling OpenRouter(Gemini) with style prompt (cleaned): ${cleanedPrompt}`);
+          if (finalPromptImageUrls.length) {
+            console.log('[artwork] Including prompt image URLs for Gemini:', finalPromptImageUrls);
+          }
+
+          const imageUrls = await generateImageWithGemini({
+            prompt: cleanedPrompt,
+            imageUrl: imageSource,
+            additionalImageUrls: finalPromptImageUrls,
+          });
+          let localPromptPaintingUrls = [];
+          if (imageUrls && imageUrls.length > 0) {
+            localPromptPaintingUrls = imageUrls;
+          } else {
+            console.warn('[artwork] No image URLs returned from Gemini (OpenRouter)');
+          }
+          res = { status: imageUrls && imageUrls.length > 0 ? 200 : 500, ok: imageUrls && imageUrls.length > 0, body: null, promptPaintingUrls: localPromptPaintingUrls };
+        } else if (usePiapi) {
           // --- DEBUG LOGS START ---
           console.log('[artwork][DEBUG] Piapi debug pre-flight:');
           console.log('[artwork][DEBUG] usePiapi:', usePiapi);
@@ -213,7 +250,7 @@ export default async function artwork(job) {
       let promptPaintingUrls = (res && res.promptPaintingUrls) ? res.promptPaintingUrls : [];
       let promptFinalUrls = [];
 
-      if (!usePiapi) {
+      if (!usePiapi && providerName !== 'gemini') {
         const data = await res.json();
         if (data && data.painting_url) promptPaintingUrls = [normalizeUrl(data.painting_url)];
       }
