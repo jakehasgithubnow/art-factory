@@ -1,6 +1,11 @@
 import express from 'express';
 import { requireApiKey } from '../../middleware/requireApiKey.js';
-import { getAll as getStylePrompts, createPrompt as createStylePrompt, updatePrompt as updateStylePrompt, togglePrompt as toggleStylePrompt } from '../../../db/stylePrompts.js';
+import {
+  getAll as getStylePrompts,
+  createPrompt as createStylePrompt,
+  updatePrompt as updateStylePrompt,
+  togglePrompt as toggleStylePrompt
+} from '../../../db/stylePrompts.js';
 import { getAll as getSystemPrompts, updatePrompt as updateSystemPrompt } from '../../../db/systemPrompts.js';
 
 function escapeHtml(str) {
@@ -9,7 +14,7 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\"/g, '&quot;')
+    .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
@@ -29,14 +34,23 @@ const ALLOWED_CATEGORIES = [
   'other'
 ];
 
+const prettyCat = (c) => c.replace(/_/g, ' ');
+
 const renderCategoryCheckboxes = (name, selected = []) => `
   <div class="group">
-    <label>Categories</label>
-    <div class="row">
-      ${ALLOWED_CATEGORIES.map(c => `
-        <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px">
+    <div class="label-row">
+      <label class="label">Categories</label>
+      <button
+        type="button"
+        class="link small"
+        onclick="(function(el){ const g=el.closest('.group'); g.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.checked=false) })(this)"
+      >Clear</button>
+    </div>
+    <div class="chips">
+      ${ALLOWED_CATEGORIES.map((c) => `
+        <label class="chip">
           <input type="checkbox" name="${name}" value="${c}" ${Array.isArray(selected) && selected.includes(c) ? 'checked' : ''}/>
-          <span>${c}</span>
+          <span>${prettyCat(c)}</span>
         </label>
       `).join('')}
     </div>
@@ -47,27 +61,32 @@ const renderCategoryCheckboxes = (name, selected = []) => `
 // Admin UI page - system prompts + style prompts
 router.get('/admin/style-prompts-ui', async (req, res, next) => {
   try {
-    const [stylePrompts, systemPrompts] = await Promise.all([
-      getStylePrompts(),
-      getSystemPrompts()
-    ]);
+    const [stylePrompts, systemPrompts] = await Promise.all([getStylePrompts(), getSystemPrompts()]);
 
     // Allowed OpenAI chat models for selection
     const allowedModelsSystem = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
     const allowedModelsStyle = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'];
+
     const renderModelSelect = (name, selected, isSystem = false) => `
-      <label>Model
-        <select name="${name}">
-          ${(isSystem ? allowedModelsSystem : allowedModelsStyle).map(m => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`).join('')}
+      <div class="field">
+        <label class="label">Model</label>
+        <select class="select" name="${name}">
+          ${(isSystem ? allowedModelsSystem : allowedModelsStyle)
+            .map((m) => `<option value="${m}" ${String(selected || '') === m ? 'selected' : ''}>${m}</option>`)
+            .join('')}
         </select>
-      </label>
+      </div>
     `;
+
     const renderScopeSelect = (name, selected) => `
-      <label>Scope
-        <select name="${name}">
-          ${['location','catchment','icon'].map(s => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`).join('')}
+      <div class="field">
+        <label class="label">Scope</label>
+        <select class="select" name="${name}">
+          ${['location', 'catchment', 'icon']
+            .map((s) => `<option value="${s}" ${String(selected || 'location') === s ? 'selected' : ''}>${s}</option>`)
+            .join('')}
         </select>
-      </label>
+      </div>
     `;
 
     res.set('Cache-Control', 'no-store');
@@ -80,29 +99,60 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
           <title>Prompts Configuration</title>
           <style>
             :root{
-              --bg:#0b0d11;--panel:#151922;--panel2:#11151c;--border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;
-              --btn:#6aa4ff;--danger:#ef4444;--ok:#10b981;--warn:#f59e0b
+              --bg:#0b0d11;--surface:#0f1320;--panel:#121828;--panel2:#0e1422;--elev:rgba(255,255,255,0.04);
+              --border:#202636;--muted:#9aa4b2;--ink:#e7ecf3;--ink-2:#cfd7e3;--accent:#6aa4ff;--accent-2:#3b82f6;
+              --danger:#ef4444;--ok:#10b981;--warn:#f59e0b;
+              --radius:12px; --radius-sm:10px; --pad:14px
             }
             *{box-sizing:border-box}
             html,body{height:100%}
-            body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;padding-top:56px}
-            .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:12px;background:linear-gradient(180deg,rgba(11,13,17,.95),rgba(11,13,17,.6) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 14px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
+            body{margin:0;background:radial-gradient(1200px 600px at 20% -10%, rgba(59,130,246,.08), transparent 50%),radial-gradient(1000px 700px at 110% 10%, rgba(16,185,129,.06), transparent 50%),var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+            .topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,rgba(11,13,17,.9),rgba(11,13,17,.65) 70%,transparent);border-bottom:1px solid var(--border);padding:8px 16px;z-index:60;backdrop-filter:saturate(120%) blur(6px)}
             .brand{font-weight:800;letter-spacing:.02em}
             .nav{display:flex;gap:10px;align-items:center}
-            .nav a{color:#8ab4ff;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
-            .nav a:hover{background:rgba(138,180,255,.08);border-color:rgba(138,180,255,.2)}
-            .wrap{max-width:1100px;margin:20px auto;padding:0 16px 40px}
-            h1{font-size:18px;margin:18px 0 10px}
-            h2{font-size:16px;margin:24px 0 10px;color:#cdd6e3}
-            form{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 12px 14px;margin:10px 0 18px}
-            label{font-weight:600;color:#cdd6e3}
-            textarea, input[type="text"]{width:100%;background:#0f1320;border:1px solid #283044;border-radius:8px;color:var(--ink);padding:8px}
-            textarea:focus, input[type="text"]:focus{outline:2px solid rgba(106,164,255,.35);border-color:#35507c}
-            .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+            .nav a{color:#b7cdfc;text-decoration:none;font-weight:600;padding:6px 10px;border-radius:8px;border:1px solid transparent}
+            .nav a:hover{background:rgba(138,180,255,.10);border-color:rgba(138,180,255,.2)}
+            .wrap{max-width:1100px;margin:76px auto 40px;padding:0 16px}
+            h1{font-size:20px;margin:24px 0 12px}
+            h2{font-size:16px;margin:18px 0 10px;color:#d6deea}
+            .panel{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin:12px 0 22px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+            .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
             .muted{color:var(--muted)}
-            .btn{background:var(--btn);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}
-            .btn[disabled]{opacity:.6;cursor:not-allowed}
-            .group{border:1px dashed var(--border);border-radius:10px;padding:10px;margin:8px 0}
+            .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+            .label-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+            .label{font-weight:700;color:#d6deea}
+            .field{display:flex;flex-direction:column;gap:6px;min-width:200px}
+            .textarea, textarea, input[type="text"]{width:100%;background:var(--surface);border:1px solid #283044;border-radius:var(--radius-sm);color:var(--ink);padding:10px 12px}
+            textarea{min-height:88px;resize:vertical}
+            textarea:focus, input[type="text"]:focus, select:focus{outline:2px solid rgba(106,164,255,.35);border-color:#35507c}
+            select{background:var(--surface);border:1px solid #283044;border-radius:var(--radius-sm);color:var(--ink);padding:10px 12px}
+            .card{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--radius);padding:12px 12px 14px;margin:12px 0}
+            .card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+            .card-title{font-weight:800;color:#eef3fb}
+            .badge{font-size:12px;padding:4px 8px;border-radius:999px;background:#1b2337;color:#cfe1ff;border:1px solid #2b3550}
+            .chips{display:flex;flex-wrap:wrap;gap:8px}
+            .chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #2b3550;border-radius:999px;background:#0e1422;color:#cfe1ff;cursor:pointer;user-select:none}
+            .chip input{appearance:none;width:0;height:0;position:absolute;opacity:0}
+            .chip span{pointer-events:none}
+            .chip:has(input:checked){background:#203056;border-color:#38558d}
+            .group{border:1px dashed #283044;border-radius:var(--radius-sm);padding:10px;margin:10px 0}
+            .switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+            .switch input{appearance:none;width:0;height:0;position:absolute;opacity:0}
+            .switch .track{position:relative;width:44px;height:24px;background:#2a3246;border:1px solid #3a435a;border-radius:999px;transition:all .2s ease}
+            .switch .track:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;background:#cfd8e3;border-radius:50%;transition:transform .2s ease, background .2s ease}
+            .switch input:checked + .track{background:#2e7d5b;border-color:#2e7d5b}
+            .switch input:checked + .track:after{transform:translateX(20px);background:#fff}
+            .switch .txt{color:#cfe1ff}
+            .actions{display:flex;justify-content:flex-end;margin-top:12px}
+            .btn{background:var(--accent);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:800;cursor:pointer}
+            .btn:hover{background:var(--accent-2)}
+            .btn.secondary{background:#2b3550}
+            .btn.danger{background:var(--danger)}
+            .link{background:transparent;border:0;color:#9fb8ff;cursor:pointer;padding:0}
+            .small{font-size:12px}
+            @media (max-width:720px){
+              .field{min-width:140px}
+            }
           </style>
         </head>
         <body>
@@ -115,49 +165,98 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             </nav>
           </header>
           <div class="wrap">
-            <h1>System Prompts</h1>
-          <form method="POST" action="/admin/system-prompts-ui/update">
-            ${systemPrompts.map(p => `
-              <div>
-                <label for="${p.key}">${p.key}</label><br/>
-                <textarea name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea><br/>
-                ${renderModelSelect(`model_${p.key}`, p.model, true)}<br/>
-              </div>
-            `).join('')}
-            <button type="submit">Save System Prompts</button>
-          </form>
-
-          <h1>Style Prompts</h1>
-          <form method="POST" action="/admin/style-prompts-ui/update">
-            ${stylePrompts.map(p => `
-              <div>
-                <label for="style-${p.id}">Prompt #${p.id}</label><br/>
-                <textarea name="text_${p.id}" rows="2" cols="80">${escapeHtml(p.text)}</textarea><br/>
-                ${renderModelSelect(`model_${p.id}`, p.model)}<br/>
-                ${renderScopeSelect(`scope_${p.id}`, p.scope)}<br/>
-                ${renderCategoryCheckboxes(`categories_${p.id}[]`, Array.isArray(p.categories) ? p.categories : [])}
-                <label>
-                  <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/> Enabled
-                </label>
-              </div>
-            `).join('')}
-            <button type="submit">Save Style Prompts</button>
-          </form>
-
-          <h2>Add New Style Prompt</h2>
-          <form method="POST" action="/admin/style-prompts-ui/create">
-            <div>
-              <label for="new-style-text">New Prompt Text</label><br/>
-              <textarea id="new-style-text" name="text" rows="2" cols="80"></textarea><br/>
-              ${renderModelSelect('model', null)}<br/>
-              ${renderScopeSelect('scope', 'location')}<br/>
-              ${renderCategoryCheckboxes('categories[]', [])}
-              <label>
-                <input type="checkbox" name="enabled" checked/> Enabled
-              </label>
+            <div class="section-head">
+              <h1>System Prompts</h1>
+              <span class="muted">Edit system-wide instructions and choose models</span>
             </div>
-            <button type="submit">Add Style Prompt</button>
-          </form>
+            <form class="panel" method="POST" action="/admin/system-prompts-ui/update">
+              ${systemPrompts.map(p => `
+                <div class="card">
+                  <div class="card-h">
+                    <div class="row">
+                      <div class="card-title">${escapeHtml(p.key)}</div>
+                      <span class="badge">system</span>
+                    </div>
+                    <div class="row">
+                      ${renderModelSelect(\`model_\${p.key}\`, p.model, true)}
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label class="label" for="${p.key}">Prompt Text</label>
+                    <textarea class="textarea" name="${p.key}" rows="3" cols="80">${escapeHtml(p.text)}</textarea>
+                  </div>
+                </div>
+              `).join('')}
+              <div class="actions">
+                <button class="btn" type="submit">Save System Prompts</button>
+              </div>
+            </form>
+
+            <div class="section-head">
+              <h1>Style Prompts</h1>
+              <span class="muted">Prompts used to generate styles; toggle, scope, categories and model</span>
+            </div>
+            <form class="panel" method="POST" action="/admin/style-prompts-ui/update">
+              ${stylePrompts.map(p => `
+                <div class="card">
+                  <div class="card-h">
+                    <div class="row">
+                      <div class="card-title">Prompt #${p.id}</div>
+                      <span class="badge">${escapeHtml(p.scope || 'location')}</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" name="enabled_${p.id}" ${p.enabled ? 'checked' : ''}/>
+                      <span class="track"></span>
+                      <span class="txt">${p.enabled ? 'Enabled' : 'Disabled'}</span>
+                    </label>
+                  </div>
+
+                  <div class="row" style="margin-bottom:8px">
+                    ${renderModelSelect(\`model_\${p.id}\`, p.model)}
+                    ${renderScopeSelect(\`scope_\${p.id}\`, p.scope)}
+                  </div>
+
+                  ${renderCategoryCheckboxes(\`categories_\${p.id}[]\`, Array.isArray(p.categories) ? p.categories : [])}
+
+                  <div class="field">
+                    <label class="label" for="style-${p.id}">Prompt Text</label>
+                    <textarea class="textarea" name="text_${p.id}" rows="3" cols="80">${escapeHtml(p.text)}</textarea>
+                  </div>
+                </div>
+              `).join('')}
+              <div class="actions">
+                <button class="btn" type="submit">Save Style Prompts</button>
+              </div>
+            </form>
+
+            <h2>Add New Style Prompt</h2>
+            <form class="panel" method="POST" action="/admin/style-prompts-ui/create">
+              <div class="card">
+                <div class="card-h">
+                  <div class="card-title">New Style Prompt</div>
+                  <label class="switch">
+                    <input type="checkbox" name="enabled" checked/>
+                    <span class="track"></span>
+                    <span class="txt">Enabled</span>
+                  </label>
+                </div>
+
+                <div class="row" style="margin-bottom:8px">
+                  ${renderModelSelect('model', null)}
+                  ${renderScopeSelect('scope', 'location')}
+                </div>
+
+                ${renderCategoryCheckboxes('categories[]', [])}
+
+                <div class="field">
+                  <label class="label" for="new-style-text">Prompt Text</label>
+                  <textarea id="new-style-text" class="textarea" name="text" rows="3" cols="80"></textarea>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn" type="submit">Add Style Prompt</button>
+              </div>
+            </form>
           </div>
         </body>
       </html>
@@ -182,7 +281,7 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
     for (const p of currentList) {
       const key = p.key;
       const text = req.body[key] ?? '';
-      const model = normModel(req.body[`model_${key}`]);
+      const model = normModel(req.body[\`model_\${key}\`]);
       const enabled = enabledByKey.hasOwnProperty(key) ? enabledByKey[key] : true;
       await updateSystemPrompt(key, text || "", enabled, model);
     }
@@ -193,7 +292,6 @@ router.post('/admin/system-prompts-ui/update', async (req, res, next) => {
   }
 });
 
-  
 // Handle updates for style prompts
 router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
   try {
@@ -204,12 +302,12 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
     for (const key of Object.keys(req.body)) {
       if (key.startsWith('text_')) {
         const id = key.split('_')[1];
-        const text = req.body[`text_${id}`];
-        const enabled = req.body[`enabled_${id}`] !== undefined;
-        const model = normModel(req.body[`model_${id}`]);
-        const scope = normScope(req.body[`scope_${id}`]);
+        const text = req.body[\`text_\${id}\`];
+        const enabled = req.body[\`enabled_\${id}\`] !== undefined;
+        const model = normModel(req.body[\`model_\${id}\`]);
+        const scope = normScope(req.body[\`scope_\${id}\`]);
         // categories may be provided as categories_id or categories_id[] depending on parser
-        const rawCats = (req.body[`categories_${id}`] !== undefined) ? req.body[`categories_${id}`] : req.body[`categories_${id}[]`];
+        const rawCats = (req.body[\`categories_\${id}\`] !== undefined) ? req.body[\`categories_\${id}\`] : req.body[\`categories_\${id}[]\`];
 
         if (text !== undefined || model !== null || scope || rawCats !== undefined) {
           await updateStylePrompt(id, text, model, scope, rawCats);
