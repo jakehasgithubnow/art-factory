@@ -164,6 +164,9 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             @media (max-width:720px){
               .field{min-width:140px}
             }
+            .test-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+            .test-grid a{display:block;border:1px solid var(--border);background:rgba(255,255,255,.02);border-radius:8px;overflow:hidden}
+            .test-img{width:160px;height:120px;object-fit:cover;display:block}
           </style>
         </head>
         <body>
@@ -239,6 +242,12 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                     <label class="label" for="style-${p.id}">Prompt Text</label>
                     <textarea class="textarea" name="text_${p.id}" rows="3" cols="80">${escapeHtml(p.text)}</textarea>
                   </div>
+
+                  <div class="actions" style="justify-content:flex-start;gap:8px">
+                    <button type="button" class="btn secondary" onclick="testStylePrompt(${p.id}, this)">Test prompt</button>
+                    <span id="tp-status-${p.id}" class="muted small"></span>
+                  </div>
+                  <div class="test-grid" id="tp-grid-${p.id}"></div>
                 </div>
               `).join('')}
               <div class="actions">
@@ -281,6 +290,45 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
               </div>
             </form>
           </div>
+          <script>
+            async function testStylePrompt(id, btn) {
+              const statusEl = document.getElementById('tp-status-' + id);
+              const grid = document.getElementById('tp-grid-' + id);
+              if (statusEl) statusEl.textContent = 'Generating 5 images...';
+              if (grid) grid.innerHTML = '';
+              if (btn) btn.disabled = true;
+              try {
+                const resp = await fetch('/admin/style-prompts/' + id + '/test', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ count: 5 })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(data && data.error ? data.error : 'Request failed');
+                const images = Array.isArray(data && data.images) ? data.images : [];
+                if (images.length === 0) {
+                  if (statusEl) statusEl.textContent = 'No images returned.';
+                  return;
+                }
+                for (const url of images) {
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.target = '_blank';
+                  const img = document.createElement('img');
+                  img.src = url;
+                  img.loading = 'lazy';
+                  img.className = 'test-img';
+                  a.appendChild(img);
+                  grid.appendChild(a);
+                }
+                if (statusEl) statusEl.textContent = 'Showing ' + images.length + ' result(s).';
+              } catch (e) {
+                if (statusEl) statusEl.textContent = 'Error: ' + (e && e.message ? e.message : 'failed');
+              } finally {
+                if (btn) btn.disabled = false;
+              }
+            }
+          </script>
         </body>
       </html>
     `);

@@ -1,5 +1,8 @@
 import express from 'express';
 import * as stylePrompts from '../../../db/stylePrompts.js';
+import db from '../../../db/client.js';
+import { generateImage } from '../../../services/openai.js';
+import { generateImageWithGemini } from '../../../services/openrouter.js';
 
 const router = express.Router({ mergeParams: true });
 
@@ -39,6 +42,17 @@ function normalizeCategories(input) {
   }
   if (set.size === 0) return null;
   return Array.from(set);
+}
+
+function applyTemplate(str, ctx) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/{{\s*(\w+)\s*}}/g, (_, k) => (ctx && ctx[k] != null ? String(ctx[k]) : ''));
+}
+
+function extractPromptImageUrls(text) {
+  const matches = (typeof text === 'string' && text.match(/https?:\/\/[^\s"'()\\]+/g)) || [];
+  const filtered = matches.filter(u => /(\.png|\.jpg|\.jpeg|\.webp)(\?|$)/i.test(u) || /res\.cloudinary\.com/i.test(u));
+  return Array.from(new Set(filtered));
 }
 
 // Get all prompts
@@ -145,6 +159,100 @@ router.patch('/:id/toggle', async (req, res) => {
   } catch (err) {
     console.error('Failed to toggle style prompt', err);
     res.status(500).json({ error: 'Failed to toggle style prompt', details: err?.message });
+  }
+});
+
+ // Test a prompt (generate sample images without persisting)
+router.post('/:id/test', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'invalid_prompt_id' });
+    }
+    const count = Math.min(10, Math.max(1, Number(req.body?.count ?? 5)));
+
+    const style = await db('style_prompts').where({ id }).first();
+    if (!style) return res.status(404).json({ error: 'prompt_not_found' });
+
+    // Pick a random approved photo with a secure URL (any catchment)
+    const row = await db('photos as p')
+      .join('locations as l', 'l.id', 'p.location_id')
+      .leftJoin('catchments as c', 'c.id', 'l.catchment_id')
+      .where('p.kept', true)
+      .andWhere('p.processed', true)
+      .whereNotNull('p.secure_url')
+      .orderByRaw('random()')
+      .select(
+        'p.id as photo_id',
+        'p.secure_url as image_url',
+        'l.id as location_id',
+        'l.name as location_name',
+        'l.category as location_category',
+        'c.name as catchment_name',
+        'c.phrases as catchment_phrases'
+      )
+      .first();
+
+    if (!row || !row.image_url) {
+      return res.status(409).json({ error: 'no_approved_source_found' });
+    }
+
+    const locMeta = {
+      locationName: row.location_name || '',
+      catchmentName: row.catchment_name || '',
+      locationCategory: row.location_category || '',
+      phrases: JSON.stringify(Array.isArray(row.catchment_phrases) ? row.catchment_phrases : [])
+    };
+
+    // Interpolate template variables
+    const resolved = applyTemplate(String(style.text || ''), {
+      ...locMeta,
+      locationname: row.location_name || '',
+      catchmentname: row.catchment_name || ''
+    });
+
+    // Extract and remove any image URLs embedded in the prompt
+    const promptImageUrls = extractPromptImageUrls(resolved).filter(u => u !== row.image_url);
+    let cleanedPrompt = resolved;
+    for (const u of promptImageUrls) cleanedPrompt = cleanedPrompt.split(u).join('');
+    cleanedPrompt = cleanedPrompt.replace(/\s{2,}/g, ' ').trim();
+
+    const provider = normProvider(style.provider);
+
+    async function runOnce() {
+      try {
+        if (provider === 'gemini') {
+          const urls = await generateImageWithGemini({
+            prompt: cleanedPrompt,
+            imageUrl: row.image_url,
+            additionalImageUrls: promptImageUrls,
+          });
+          return urls?.[0] || null;
+        } else {
+          const urls = await generateImage({
+            prompt: cleanedPrompt,
+            imageUrl: row.image_url,
+            additionalImageUrls: promptImageUrls,
+          });
+          return urls?.[0] || null;
+        }
+      } catch (e) {
+        return null;
+      }
+    }
+
+    const tasks = Array.from({ length: count }, () => runOnce());
+    const results = await Promise.all(tasks);
+    const images = results.filter(Boolean);
+
+    return res.json({
+      images,
+      source: { photoId: row.photo_id, imageUrl: row.image_url },
+      location: { id: row.location_id, name: row.location_name, category: row.location_category, catchmentName: row.catchment_name }
+    });
+  } catch (err) {
+    console.error('Failed to test style prompt', err);
+    res.status(500).json({ error: 'test_failed' });
   }
 });
 
