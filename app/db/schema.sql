@@ -257,6 +257,9 @@ ALTER TABLE style_prompts ALTER COLUMN provider SET NOT NULL;
 ALTER TABLE style_prompts DROP CONSTRAINT IF EXISTS style_prompts_provider_check;
 ALTER TABLE style_prompts ADD CONSTRAINT style_prompts_provider_check CHECK (provider in ('piapi','gemini'));
 
+-- Backfill 'name' column (human-friendly label) for style_prompts
+ALTER TABLE style_prompts ADD COLUMN IF NOT EXISTS name text;
+
 -- ===================== Quality-of-life ===================
 create index if not exists idx_catchments_processed on catchments(processed);
 create index if not exists idx_locations_processed on locations(processed);
