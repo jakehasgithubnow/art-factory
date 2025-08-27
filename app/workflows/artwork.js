@@ -341,7 +341,7 @@ export default async function artwork(job) {
           .insert({
             photo_id: photoId,
             style_prompt_id: stylePrompt.id,
-            style_name: stylePrompt.text,
+            style_name: (typeof stylePrompt?.name === 'string' && stylePrompt.name.trim() ? stylePrompt.name.trim() : stylePrompt.text),
             image_url: mainPaintingUrl,
             description: description
           })

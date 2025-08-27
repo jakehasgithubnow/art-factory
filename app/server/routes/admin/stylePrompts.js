@@ -55,13 +55,16 @@ router.get('/', async (req, res) => {
 // Create a prompt
 router.post('/', async (req, res) => {
   try {
-    const { text, enabled, model, scope, categories, provider } = req.body;
+    const { text, enabled, model, scope, categories, provider, name } = req.body;
     if (typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Prompt text is required' });
     }
     // normalize categories (string, array or null)
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      return res.status(400).json({ error: 'Name must be a string or null' });
+    }
     const cats = normalizeCategories(categories);
-    const prompt = await stylePrompts.createPrompt(text.trim(), enabled, model, scope, cats, normProvider(provider));
+    const prompt = await stylePrompts.createPrompt(text.trim(), enabled, model, scope, cats, normProvider(provider), name);
     res.status(201).json(prompt);
   } catch (err) {
     console.error('Failed to create style prompt', err);
@@ -77,10 +80,10 @@ router.patch('/:id', async (req, res) => {
       return res.status(400).json({ error: 'Invalid prompt id' });
     }
 
-    const { text, model, scope, categories, provider } = req.body;
+    const { text, model, scope, categories, provider, name } = req.body;
 
-    if (text === undefined && model === undefined && scope === undefined && categories === undefined && provider === undefined) {
-      return res.status(400).json({ error: 'Nothing to update. Provide one of: text, model, scope, categories, provider.' });
+    if (text === undefined && model === undefined && scope === undefined && categories === undefined && provider === undefined && name === undefined) {
+      return res.status(400).json({ error: 'Nothing to update. Provide one of: text, model, scope, categories, provider, name.' });
     }
 
     if (text !== undefined && typeof text !== 'string') {
@@ -98,10 +101,13 @@ router.patch('/:id', async (req, res) => {
     if (provider !== undefined && provider !== null && typeof provider !== 'string') {
       return res.status(400).json({ error: 'Provider must be a string (piapi or gemini) or null' });
     }
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      return res.status(400).json({ error: 'Name must be a string or null' });
+    }
 
     const cats = (categories === undefined) ? undefined : normalizeCategories(categories);
 
-    const prompt = await stylePrompts.updatePrompt(id, text, model, scope, cats, provider === undefined ? undefined : normProvider(provider));
+    const prompt = await stylePrompts.updatePrompt(id, text, model, scope, cats, provider === undefined ? undefined : normProvider(provider), name);
     res.json(prompt);
   } catch (err) {
     console.error('Failed to update style prompt', err);

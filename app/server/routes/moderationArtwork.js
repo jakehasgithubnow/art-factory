@@ -16,9 +16,11 @@ router.get('/admin/artworks', async (req, res, next) => {
     const rows = await db('artwork as a')
       .join('photos as p', 'p.id', 'a.photo_id')
       .join('locations as l', 'l.id', 'p.location_id')
+      .leftJoin('style_prompts as sp', 'sp.id', 'a.style_prompt_id')
       .select(
-        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at',
-        'p.id as photo_id','l.name as location_name','p.thumbnail_url as photo_thumbnail_url','p.detail_url as photo_detail_url'
+        'a.id','a.image_url','a.description','a.mockup_urls','a.published','a.approved_for_publish','a.moderated_at','a.style_name',
+        'p.id as photo_id','l.name as location_name','p.thumbnail_url as photo_thumbnail_url','p.detail_url as photo_detail_url',
+        'sp.name as style_prompt_name'
       )
       .where('l.catchment_id', catchmentId)
       .modify(qb => {

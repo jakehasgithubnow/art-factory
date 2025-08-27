@@ -212,7 +212,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                 <div class="card">
                   <div class="card-h">
                     <div class="row">
-                      <div class="card-title">Prompt #${p.id}</div>
+                      <div class="card-title">Prompt #${p.id}${p.name ? ' — ' + escapeHtml(p.name) : ''}</div>
                       <span class="badge">${escapeHtml(p.scope || 'location')}</span>
                     </div>
                     <label class="switch">
@@ -229,6 +229,11 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                   </div>
 
                   ${renderCategoryCheckboxes('categories_' + p.id + '[]', Array.isArray(p.categories) ? p.categories : [])}
+
+                  <div class="field">
+                    <label class="label" for="name_${p.id}">Style Name</label>
+                    <input type="text" class="textarea" name="name_${p.id}" value="${escapeHtml(p.name || '')}"/>
+                  </div>
 
                   <div class="field">
                     <label class="label" for="style-${p.id}">Prompt Text</label>
@@ -260,6 +265,11 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                 </div>
 
                 ${renderCategoryCheckboxes('categories[]', [])}
+
+                <div class="field">
+                  <label class="label" for="new-style-name">Style Name</label>
+                  <input id="new-style-name" type="text" class="textarea" name="name"/>
+                </div>
 
                 <div class="field">
                   <label class="label" for="new-style-text">Prompt Text</label>
@@ -322,9 +332,10 @@ router.post('/admin/style-prompts-ui/update', async (req, res, next) => {
         // categories may be provided as categories_id or categories_id[] depending on parser
         const rawCats = (req.body['categories_' + id] !== undefined) ? req.body['categories_' + id] : req.body['categories_' + id + '[]'];
         const provider = req.body['provider_' + id];
+        const name = req.body['name_' + id];
 
-        if (text !== undefined || model !== null || scope || rawCats !== undefined || provider !== undefined) {
-          await updateStylePrompt(id, text, model, scope, rawCats, provider);
+        if (text !== undefined || model !== null || scope || rawCats !== undefined || provider !== undefined || name !== undefined) {
+          await updateStylePrompt(id, text, model, scope, rawCats, provider, name);
         }
         await toggleStylePrompt(id, enabled);
       }
@@ -348,9 +359,10 @@ router.post('/admin/style-prompts-ui/create', async (req, res, next) => {
     const scope = (['location','catchment','icon'].includes(String(req.body?.scope || 'location')) ? String(req.body?.scope || 'location') : 'location');
     const rawCats = (req.body?.categories !== undefined) ? req.body.categories : req.body?.['categories[]'];
     const provider = req.body?.provider;
+    const name = req.body?.name;
 
     if (typeof text === 'string' && text.trim().length > 0) {
-      await createStylePrompt(text.trim(), enabled, model, scope, rawCats, provider);
+      await createStylePrompt(text.trim(), enabled, model, scope, rawCats, provider, name);
     }
     res.redirect('/admin/style-prompts-ui');
   } catch (err) {

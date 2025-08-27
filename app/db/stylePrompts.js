@@ -47,7 +47,7 @@ export async function getAll() {
   return db('style_prompts').orderBy('id', 'asc');
 }
 
-export async function createPrompt(text, enabled = true, model = null, scope = 'location', categories = null, provider = 'piapi') {
+export async function createPrompt(text, enabled = true, model = null, scope = 'location', categories = null, provider = 'piapi', name = null) {
   const insertData = {
     text,
     enabled,
@@ -61,13 +61,21 @@ export async function createPrompt(text, enabled = true, model = null, scope = '
   if (normCats) insertData.categories = normCats;
   else insertData.categories = null;
 
+  if (name !== undefined) {
+    if (name == null || (typeof name === 'string' && name.trim() === '')) {
+      insertData.name = null;
+    } else if (typeof name === 'string') {
+      insertData.name = name.trim();
+    }
+  }
+
   const [prompt] = await db('style_prompts')
     .insert(insertData)
     .returning('*');
   return prompt;
 }
 
-export async function updatePrompt(id, text, model, scope, categories, provider) {
+export async function updatePrompt(id, text, model, scope, categories, provider, name) {
   const patch = { updated_at: db.fn.now() };
   if (typeof text === 'string') patch.text = text;
   if (model !== undefined) {
@@ -91,6 +99,13 @@ export async function updatePrompt(id, text, model, scope, categories, provider)
   }
   if (provider !== undefined) {
     patch.provider = normalizeProvider(provider);
+  }
+  if (name !== undefined) {
+    if (name == null || (typeof name === 'string' && name.trim() === '')) {
+      patch.name = null;
+    } else if (typeof name === 'string') {
+      patch.name = name.trim();
+    }
   }
   const [prompt] = await db('style_prompts')
     .where({ id })

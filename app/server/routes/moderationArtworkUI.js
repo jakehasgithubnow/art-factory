@@ -72,6 +72,7 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   <div class="title">Moderate Artwork</div>
   <div class="pill">Catchment: ${catchmentId}</div>
   <div id="location" class="pill">—</div>
+  <div id="style" class="pill">—</div>
   <nav class="nav">
     <a href="/admin/style-prompts-ui">Style Prompts</a>
     <a href="#" onclick="(function(){ const id=prompt('Catchment ID'); if(id) location.href='/admin/moderate/'+encodeURIComponent(id) })()">Moderate Photos</a>
@@ -103,6 +104,7 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
   const apiKeyInput = document.getElementById('apiKey');
   const artImg = document.getElementById('artImg');
   const locationEl = document.getElementById('location');
+  const styleEl = document.getElementById('style');
   const countEl = document.getElementById('count');
   const passBtn = document.getElementById('passBtn');
   const failBtn = document.getElementById('failBtn');
@@ -173,6 +175,7 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
       document.body.classList.add('empty-state');
       artImg.removeAttribute('src');
       locationEl.textContent = '—';
+      if (styleEl) styleEl.textContent = '—';
       countEl.textContent = '0 / 0';
       photoContainer.style.display = 'none';
       return;
@@ -186,6 +189,7 @@ router.get('/admin/moderate-artwork/:catchmentId', async (req, res, next) => {
       artImg.src = src;
     }
     locationEl.textContent = a.location_name || '—';
+    if (styleEl) styleEl.textContent = (a.style_prompt_name || a.style_name || '—');
     countEl.textContent = (idx + 1) + ' / ' + total;
 
     if (showPhoto && a.photo_thumbnail_url){
