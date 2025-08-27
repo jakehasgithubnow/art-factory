@@ -164,9 +164,9 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             @media (max-width:720px){
               .field{min-width:140px}
             }
-            .test-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-            .test-grid a{display:block;border:1px solid var(--border);background:rgba(255,255,255,.02);border-radius:8px;overflow:hidden}
-            .test-img{width:160px;height:120px;object-fit:cover;display:block}
+            .test-grid{display:block;margin-top:8px}
+            .test-grid a{display:block;border:1px solid var(--border);background:rgba(255,255,255,.02);border-radius:12px;overflow:hidden;margin:10px 0}
+            .test-img{width:100%;height:auto;object-fit:contain;display:block}
           </style>
         </head>
         <body>
@@ -244,7 +244,8 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                   </div>
 
                   <div class="actions" style="justify-content:flex-start;gap:8px">
-                    <button type="button" class="btn secondary" onclick="testStylePrompt(${p.id}, this)">Test prompt</button>
+                    <button type="button" class="btn secondary" onclick="testStylePrompt(${p.id}, 1, this)">Test 1</button>
+                    <button type="button" class="btn secondary" onclick="testStylePrompt(${p.id}, 5, this)">Test 5</button>
                     <span id="tp-status-${p.id}" class="muted small"></span>
                   </div>
                   <div class="test-grid" id="tp-grid-${p.id}"></div>
@@ -291,17 +292,17 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             </form>
           </div>
           <script>
-            async function testStylePrompt(id, btn) {
+            async function testStylePrompt(id, count, btn) {
               const statusEl = document.getElementById('tp-status-' + id);
               const grid = document.getElementById('tp-grid-' + id);
-              if (statusEl) statusEl.textContent = 'Generating 5 images...';
+              if (statusEl) statusEl.textContent = 'Generating ' + (count || 5) + ' image' + ((count || 5) === 1 ? '' : 's') + '...';
               if (grid) grid.innerHTML = '';
               if (btn) btn.disabled = true;
               try {
                 const resp = await fetch('/admin/style-prompts/' + id + '/test', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ count: 5 })
+                  body: JSON.stringify({ count: count || 5 })
                 });
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok) throw new Error(data && data.error ? data.error : 'Request failed');
