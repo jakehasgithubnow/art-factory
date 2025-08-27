@@ -155,6 +155,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
             .switch input:checked + .track:after{transform:translateX(20px);background:#fff}
             .switch .txt{color:#cfe1ff}
             .actions{display:flex;justify-content:flex-end;margin-top:12px}
+            .actions.sticky{position:sticky;bottom:12px;background:linear-gradient(180deg, rgba(18,24,40,0), var(--panel) 35%);padding-top:8px;z-index:80}
             .btn{background:var(--accent);border:0;border-radius:10px;color:#fff;padding:10px 16px;font-weight:800;cursor:pointer}
             .btn:hover{background:var(--accent-2)}
             .btn.secondary{background:#2b3550}
@@ -251,7 +252,7 @@ router.get('/admin/style-prompts-ui', async (req, res, next) => {
                   <div class="test-grid" id="tp-grid-${p.id}"></div>
                 </div>
               `).join('')}
-              <div class="actions">
+              <div class="actions sticky">
                 <button class="btn" type="submit">Save Style Prompts</button>
               </div>
             </form>
